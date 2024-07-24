@@ -77,6 +77,13 @@ impl Eth2Config {
             spec: ChainSpec::gnosis(),
         }
     }
+
+    pub fn wvm() -> Self {
+        Self {
+            eth_spec_id: EthSpecId::WVM,
+            spec: ChainSpec::wvm(),
+        }
+    }
 }
 
 /// Describes how a genesis state may be obtained.
@@ -294,6 +301,15 @@ define_hardcoded_nets!(
         // The name of the directory in the `eth2_network_config/built_in_network_configs`
         // directory where the configuration files are located for this network.
         "gnosis",
+        // Describes how the genesis state can be obtained.
+        GenesisStateSource::IncludedBytes
+    ),
+    (
+        // Network name (must be unique among all networks).
+        wvm,
+        // The name of the directory in the `eth2_network_config/built_in_network_configs`
+        // directory where the configuration files are located for this network.
+        "wvm",
         // Describes how the genesis state can be obtained.
         GenesisStateSource::IncludedBytes
     ),
