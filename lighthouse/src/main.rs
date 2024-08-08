@@ -34,7 +34,7 @@ lazy_static! {
          SHA256 hardware acceleration: {}\n\
          Allocator: {}\n\
          Profile: {}\n\
-         Specs: mainnet (true), minimal ({}), gnosis ({})",
+         Specs: mainnet (true), minimal ({}), gnosis ({}), wvm({})",
         SHORT_VERSION.as_str(),
         bls_library_name(),
         bls_hardware_acceleration(),
@@ -43,6 +43,7 @@ lazy_static! {
         build_profile_name(),
         cfg!(feature = "spec-minimal"),
         cfg!(feature = "gnosis"),
+        cfg!(feature = "wvm"),
     );
 }
 
@@ -464,6 +465,8 @@ fn main() {
             EthSpecId::Gnosis => run(EnvironmentBuilder::gnosis(), &matches, eth2_network_config),
             #[cfg(feature = "spec-minimal")]
             EthSpecId::Minimal => run(EnvironmentBuilder::minimal(), &matches, eth2_network_config),
+            #[cfg(feature = "wvm")]
+            EthSpecId::WVM => run(EnvironmentBuilder::wvm(), &matches, eth2_network_config),
             #[cfg(not(all(feature = "spec-minimal", feature = "gnosis")))]
             other => {
                 eprintln!(

@@ -18,6 +18,8 @@ modern = ["bls/supranational-force-adx"]
 spec-minimal = []
 # Support Gnosis spec and Gnosis Beacon Chain.
 gnosis = []
+# Support WVM spec and WVM Testnet Chain.
+wvm = []
 # Support slasher MDBX backend.
 slasher-mdbx = ["slasher/mdbx"]
 # Support slasher LMDB backend.

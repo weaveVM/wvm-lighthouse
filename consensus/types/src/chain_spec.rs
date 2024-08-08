@@ -870,6 +870,7 @@ impl ChainSpec {
         wvm_spec.eth1_follow_distance = 128;
         wvm_spec.seconds_per_slot = 2;
         wvm_spec.seconds_per_eth1_block = 2;
+
         wvm_spec.deposit_chain_id = 9496;
         wvm_spec.deposit_network_id = 9496;
 
