@@ -903,6 +903,14 @@ impl ChainSpec {
         wvm_spec.electra_fork_version = [153, 0, 0, 5];
         wvm_spec.electra_fork_epoch = None;
 
+
+        wvm_spec.min_activation_balance = option_wrapper(|| {
+            5000u64.checked_mul(u64::checked_pow(10, 9)?) // 5k for validator in testnet
+        }).expect("calculation does not overflow");
+
+        wvm_spec.max_effective_balance_electra =option_wrapper(|| {
+            5000u64.checked_mul(u64::checked_pow(10, 9)?) // 5k for validator in testnet
+        }).expect("calculation does not overflow");
         wvm_spec
     }
 
@@ -1673,6 +1681,7 @@ impl Config {
             "minimal" => Some(EthSpecId::Minimal),
             "mainnet" => Some(EthSpecId::Mainnet),
             "gnosis" => Some(EthSpecId::Gnosis),
+            "wvm" => Some(EthSpecId::WVM),
             _ => None,
         }
     }

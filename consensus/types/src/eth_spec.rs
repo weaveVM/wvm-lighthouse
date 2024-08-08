@@ -588,10 +588,12 @@ impl EthSpec for GnosisEthSpec {
 pub struct WvmEthSpec;
 
 impl EthSpec for WvmEthSpec {
+    type GenesisEpoch = U0;
     type JustificationBitsLength = U4;
     type SubnetBitfieldLength = U64;
     type MaxValidatorsPerCommittee = U2048;
-    type GenesisEpoch = U0;
+    type MaxValidatorsPerSlot = U131072;
+    type MaxCommitteesPerSlot = U64;
     type SlotsPerEpoch = U32;
     type EpochsPerEth1VotingPeriod = U64;
     type SlotsPerHistoricalRoot = U8192;
@@ -606,32 +608,45 @@ impl EthSpec for WvmEthSpec {
     type MaxVoluntaryExits = U16;
     type SyncCommitteeSize = U512;
     type SyncCommitteeSubnetCount = U4;
-    type MaxBytesPerTransaction = U1073741824; // 1,073,741,824
-    type MaxTransactionsPerPayload = U1048576; // 1,048,576
+    type MaxBytesPerTransaction = U1073741824;
+    // 1,073,741,824
+    type MaxTransactionsPerPayload = U1048576;
+    // 1,048,576
     type BytesPerLogsBloom = U256;
     type GasLimitDenominator = U1024;
     type MinGasLimit = U5000;
     type MaxExtraDataBytes = U32;
-    type MaxBlobsPerBlock = U6;
-    type MaxBlobCommitmentsPerBlock = U4096;
-    type BytesPerFieldElement = U32;
-    type FieldElementsPerBlob = U4096;
-    type BytesPerBlob = U131072;
-    type KzgCommitmentInclusionProofDepth = U17;
-    type SyncSubcommitteeSize = U128; // 512 committee size / 4 sync committee subnet count
-    type MaxPendingAttestations = U4096; // 128 max attestations * 32 slots per epoch
-    type SlotsPerEth1VotingPeriod = U2048; // 64 epochs * 32 slots per epoch
+    // 64 epochs * 32 slots per epoch
     type MaxBlsToExecutionChanges = U16;
     type MaxWithdrawalsPerPayload = U16;
+    type MaxBlobsPerBlock = U6;
+    type MaxBlobCommitmentsPerBlock = U4096;
+    type FieldElementsPerBlob = U4096;
+    type BytesPerFieldElement = U32;
+    type KzgCommitmentInclusionProofDepth = U17;
+    type FieldElementsPerCell = U64;
+    type FieldElementsPerExtBlob = U8192;
+    type KzgCommitmentsInclusionProofDepth = U4;
+    // 512 committee size / 4 sync committee subnet count
+    type MaxPendingAttestations = U4096;
+    // 128 max attestations * 32 slots per epoch
+    type SlotsPerEth1VotingPeriod = U2048;
+    type SyncSubcommitteeSize = U128;
+    type BytesPerBlob = U131072;
+    // inclusion of the whole list of commitments
+    type BytesPerCell = U2048;
     type PendingBalanceDepositsLimit = U134217728;
+
     type PendingPartialWithdrawalsLimit = U134217728;
+
     type PendingConsolidationsLimit = U262144;
+
     type MaxConsolidations = U1;
-    type MaxDepositReceiptsPerPayload = U8192;
+    type MaxDepositRequestsPerPayload = U8192;
     type MaxAttesterSlashingsElectra = U1;
     type MaxAttestationsElectra = U8;
-    type MaxWithdrawalRequestsPerPayload = U16;
 
+    type MaxWithdrawalRequestsPerPayload = U16;
     fn default_spec() -> ChainSpec {
         ChainSpec::wvm()
     }
@@ -641,9 +656,10 @@ impl EthSpec for WvmEthSpec {
     }
 }
 
+
 #[cfg(test)]
 mod test {
-    use crate::{EthSpec, GnosisEthSpec, MainnetEthSpec, MinimalEthSpec};
+    use crate::{EthSpec, GnosisEthSpec, MainnetEthSpec, MinimalEthSpec, WvmEthSpec};
     use ssz_types::typenum::Unsigned;
 
     fn assert_valid_spec<E: EthSpec>() {
@@ -663,5 +679,9 @@ mod test {
     #[test]
     fn gnosis_spec() {
         assert_valid_spec::<GnosisEthSpec>();
+    }
+    #[test]
+    fn wvm_spec() {
+        assert_valid_spec::<WvmEthSpec>();
     }
 }
