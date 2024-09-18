@@ -46,10 +46,10 @@ EIP7594_FORK_EPOCH: 18446744073709551615
 
 # Time parameters
 # ---------------------------------------------------------------
-# 12 seconds
-SECONDS_PER_SLOT: 2
+# 1 second
+SECONDS_PER_SLOT: 1
 # 14 (estimate from Eth1 mainnet)
-SECONDS_PER_ETH1_BLOCK: 2
+SECONDS_PER_ETH1_BLOCK: 1
 # 2**8 (= 256) epochs ~27 hours
 MIN_VALIDATOR_WITHDRAWABILITY_DELAY: 256
 # 2**8 (= 256) epochs ~27 hours
