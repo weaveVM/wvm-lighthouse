@@ -868,8 +868,8 @@ impl ChainSpec {
         wvm_spec.genesis_fork_version = [153, 0, 0, 0];
         wvm_spec.genesis_delay = 1200;
         wvm_spec.eth1_follow_distance = 128;
-        wvm_spec.seconds_per_slot = 2;
-        wvm_spec.seconds_per_eth1_block = 2;
+        wvm_spec.seconds_per_slot = 1;
+        wvm_spec.seconds_per_eth1_block = 1;
 
         wvm_spec.deposit_chain_id = 9496;
         wvm_spec.deposit_network_id = 9496;
@@ -890,7 +890,7 @@ impl ChainSpec {
             5000u64.checked_mul(u64::checked_pow(10, 9)?) // 5k for validator in testnet
         })
         .expect("calculation does not overflow");
-        wvm_spec.seconds_per_slot = 2; // 2s per slot
+        wvm_spec.seconds_per_slot = 1; // 1s per slot
         wvm_spec.deposit_contract_address = "0x4242424242424242424242424242424242424242"
             .parse()
             .expect("minimal chain spec deposit address");
