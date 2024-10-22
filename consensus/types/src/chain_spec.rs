@@ -863,10 +863,10 @@ impl ChainSpec {
     pub fn wvm() -> Self {
         let mut wvm_spec = Self::mainnet();
         wvm_spec.config_name = Some("wvm".to_string());
-        wvm_spec.min_genesis_active_validator_count = 1;
-        wvm_spec.min_genesis_time = 1720614340;
+        wvm_spec.min_genesis_active_validator_count = 2;
+        wvm_spec.min_genesis_time = 1729611153;
         wvm_spec.genesis_fork_version = [153, 0, 0, 0];
-        wvm_spec.genesis_delay = 1200;
+        wvm_spec.genesis_delay = 3000;
         wvm_spec.eth1_follow_distance = 128;
         wvm_spec.seconds_per_slot = 1;
         wvm_spec.seconds_per_eth1_block = 1;
@@ -881,7 +881,7 @@ impl ChainSpec {
 
         wvm_spec.terminal_total_difficulty = Uint256::from(0);
         wvm_spec.terminal_block_hash = ExecutionBlockHash::from_str(
-            "0x77658b7e54e6f06537f53248266cbdb5ee143c91dd3dd062b5aa340cc5cefc49",
+            "0x60506d13c36c4daecc94fc3c9916e7a0f27b909a92a31f11280a89085657a664",
         )
         .expect("hash in a proper format");
         wvm_spec.terminal_block_hash_activation_epoch = Epoch::new(0);
