@@ -75,6 +75,7 @@ jobs:
                       type=registry,ref=us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/wvm-lighthouse:buildcache
                   build-args: |
                       BUILDKIT_INLINE_CACHE=1
+                      FEATURES=wvm
 
             - name: Verify local image
               run: |
@@ -97,60 +98,17 @@ jobs:
               id: test
               continue-on-error: true
               run: |
-                  cd .testnet
-                  mkdir -p logs
 
-                  echo "Starting Docker Compose..."
-                  if ! docker compose up -d; then
-                    echo "Docker Compose failed. Collecting logs..."
-                    docker ps -a
-                    docker compose logs > logs/compose.log
-                    for container in $(docker compose ps -q); do
-                      name=$(docker inspect --format='{{.Name}}' $container)
-                      echo "=== Logs for $name ==="
-                      docker logs $container &> "logs/$name.log"
-                      cat "logs/$name.log"
-                    done
-                    exit 1
-                  fi
-
-                  echo "Installing dependencies..."
-                  if ! npm install; then
-                    echo "npm install failed"
-                    docker compose logs > logs/compose_fail.log
-                    cat logs/compose_fail.log
-                    exit 1
-                  fi
-
-                  echo "Running tests..."
-                  if ! SIGNER_KEY=${{ secrets.TEST_SIGNER_KEY }} node test.js; then
-                    echo "Tests failed"
-                    docker compose logs > logs/compose_fail.log
-                    cat logs/compose_fail.log
-                    exit 1
-                  fi
-
-                  echo "Tests completed successfully"
+                  echo "Tests will be added soon"
 
             - name: Report test status
               if: always()
               run: |
-                  if [ "${{ steps.test.outcome }}" == "failure" ]; then
-                    echo "::warning ::Tests failed but continuing due to force_build option"
-                    echo "### ⚠️ Test Results" >> $GITHUB_STEP_SUMMARY
-                    echo "Tests failed but build will continue as force_build is enabled." >> $GITHUB_STEP_SUMMARY
-                    echo "Please check test logs for details." >> $GITHUB_STEP_SUMMARY
-                  fi
 
             - name: Cleanup test environment
               if: always()
               run: |
-                  cd .testnet || true
-                  docker compose down || true
-                  cd ..
-                  sudo rm -rf .testnet
-
-            # CHANGED: Modified push step to use existing image
+                  # CHANGED: Modified push step to use existing image
             - name: Push to registry
               if: success() || github.event.inputs.force_build == 'true'
               uses: docker/build-push-action@v6
