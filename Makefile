@@ -15,16 +15,16 @@ PINNED_NIGHTLY ?= nightly
 CLIPPY_PINNED_NIGHTLY=nightly-2022-05-19
 
 # List of features to use when cross-compiling. Can be overridden via the environment.
-CROSS_FEATURES ?= gnosis,slasher-lmdb,slasher-mdbx,slasher-redb,jemalloc
+CROSS_FEATURES ?= gnosis,slasher-lmdb,slasher-mdbx,slasher-redb,jemalloc,wvm
 
 # Cargo profile for Cross builds. Default is for local builds, CI uses an override.
 CROSS_PROFILE ?= release
 
 # List of features to use when running EF tests.
-EF_TEST_FEATURES ?=
+EF_TEST_FEATURES ?= wvm
 
 # List of features to use when running CI tests.
-TEST_FEATURES ?=
+TEST_FEATURES ?= wvm
 
 # Cargo profile for regular builds.
 PROFILE ?= release
