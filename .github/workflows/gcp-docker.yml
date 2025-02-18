@@ -28,7 +28,7 @@ jobs:
               id: meta
               uses: docker/metadata-action@v5
               with:
-                  images: us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/wvm/lighthouse
+                  images: us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/wvm-lighthouse
                   tags: |
                       type=raw,value=latest,enable=${{ github.ref == 'refs/heads/stable' || (github.ref_type == 'tag' && github.event.base_ref == 'refs/heads/stable') }}
                       type=ref,event=tag
