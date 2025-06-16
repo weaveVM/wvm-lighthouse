@@ -92,7 +92,7 @@ impl Eth2Config {
     pub fn wvm() -> Self {
         Self {
             eth_spec_id: EthSpecId::WVM,
-            spec: ChainSpec::wvm(),
+            spec: Arc::new(ChainSpec::wvm()),
         }
     }
 }

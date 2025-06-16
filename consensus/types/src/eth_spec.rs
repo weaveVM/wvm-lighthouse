@@ -618,7 +618,6 @@ impl EthSpec for WvmEthSpec {
     // 64 epochs * 32 slots per epoch
     type MaxBlsToExecutionChanges = U16;
     type MaxWithdrawalsPerPayload = U16;
-    type MaxBlobsPerBlock = U6;
     type MaxBlobCommitmentsPerBlock = U4096;
     type FieldElementsPerBlob = U4096;
     type BytesPerFieldElement = U32;
@@ -634,18 +633,20 @@ impl EthSpec for WvmEthSpec {
     type BytesPerBlob = U131072;
     // inclusion of the whole list of commitments
     type BytesPerCell = U2048;
-    type PendingBalanceDepositsLimit = U134217728;
+    type PendingDepositsLimit = U134217728;
 
     type PendingPartialWithdrawalsLimit = U134217728;
 
     type PendingConsolidationsLimit = U262144;
 
-    type MaxConsolidations = U1;
+    type MaxConsolidationRequestsPerPayload = U2;
     type MaxDepositRequestsPerPayload = U8192;
     type MaxAttesterSlashingsElectra = U1;
     type MaxAttestationsElectra = U8;
 
     type MaxWithdrawalRequestsPerPayload = U16;
+    type MaxPendingDepositsPerEpoch = U16;
+
     fn default_spec() -> ChainSpec {
         ChainSpec::wvm()
     }

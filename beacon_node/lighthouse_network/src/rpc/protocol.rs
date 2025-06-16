@@ -624,7 +624,7 @@ pub fn rpc_blob_limits<E: EthSpec>() -> RpcLimits {
         EthSpecId::Minimal => {
             RpcLimits::new(*BLOB_SIDECAR_SIZE_MINIMAL, *BLOB_SIDECAR_SIZE_MINIMAL)
         }
-        EthSpecId::Mainnet | EthSpecId::Gnosis => {
+        EthSpecId::Mainnet | EthSpecId::Gnosis | EthSpecId::WVM => {
             RpcLimits::new(*BLOB_SIDECAR_SIZE, *BLOB_SIDECAR_SIZE)
         }
     }
