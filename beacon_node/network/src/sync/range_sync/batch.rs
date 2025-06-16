@@ -1,4 +1,4 @@
-use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
+use beacon_chain::block_verification_types::RpcBlock;
 use lighthouse_network::rpc::methods::BlocksByRangeRequest;
 use lighthouse_network::service::api_types::Id;
 use lighthouse_network::PeerId;
@@ -20,6 +20,7 @@ const MAX_BATCH_PROCESSING_ATTEMPTS: u8 = 3;
 #[derive(Debug, Copy, Clone, Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum ByRangeRequestType {
+    BlocksAndColumns,
     BlocksAndBlobs,
     Blocks,
 }
@@ -199,9 +200,9 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
     }
 
     /// Verifies if an incoming block belongs to this batch.
-    pub fn is_expecting_block(&self, peer_id: &PeerId, request_id: &Id) -> bool {
-        if let BatchState::Downloading(expected_peer, expected_id) = &self.state {
-            return peer_id == expected_peer && expected_id == request_id;
+    pub fn is_expecting_block(&self, request_id: &Id) -> bool {
+        if let BatchState::Downloading(_, expected_id) = &self.state {
+            return expected_id == request_id;
         }
         false
     }
@@ -270,42 +271,9 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
     pub fn download_completed(
         &mut self,
         blocks: Vec<RpcBlock<E>>,
-    ) -> Result<
-        usize, /* Received blocks */
-        Result<(Slot, Slot, BatchOperationOutcome), WrongState>,
-    > {
+    ) -> Result<usize /* Received blocks */, WrongState> {
         match self.state.poison() {
             BatchState::Downloading(peer, _request_id) => {
-                // verify that blocks are in range
-                if let Some(last_slot) = blocks.last().map(|b| b.slot()) {
-                    // the batch is non-empty
-                    let first_slot = blocks[0].slot();
-
-                    let failed_range = if first_slot < self.start_slot {
-                        Some((self.start_slot, first_slot))
-                    } else if self.end_slot < last_slot {
-                        Some((self.end_slot, last_slot))
-                    } else {
-                        None
-                    };
-
-                    if let Some((expected, received)) = failed_range {
-                        // this is a failed download, register the attempt and check if the batch
-                        // can be tried again
-                        self.failed_download_attempts.push(peer);
-                        self.state = if self.failed_download_attempts.len()
-                            >= B::max_batch_download_attempts() as usize
-                        {
-                            BatchState::Failed
-                        } else {
-                            // drop the blocks
-                            BatchState::AwaitingDownload
-                        };
-
-                        return Err(Ok((expected, received, self.outcome())));
-                    }
-                }
-
                 let received = blocks.len();
                 self.state = BatchState::AwaitingProcessing(peer, blocks, Instant::now());
                 Ok(received)
@@ -313,10 +281,10 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
             BatchState::Poisoned => unreachable!("Poisoned batch"),
             other => {
                 self.state = other;
-                Err(Err(WrongState(format!(
+                Err(WrongState(format!(
                     "Download completed for batch in wrong state {:?}",
                     self.state
-                ))))
+                )))
             }
         }
     }
@@ -463,6 +431,11 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
             }
         }
     }
+
+    // Visualizes the state of this batch using state::visualize()
+    pub fn visualize(&self) -> char {
+        self.state.visualize()
+    }
 }
 
 /// Represents a peer's attempt and providing the result for this batch.
@@ -536,6 +509,22 @@ impl<E: EthSpec> std::fmt::Debug for BatchState<E> {
                 write!(f, "Downloading({}, {})", peer, request_id)
             }
             BatchState::Poisoned => f.write_str("Poisoned"),
+        }
+    }
+}
+
+impl<E: EthSpec> BatchState<E> {
+    /// Creates a character representation/visualization for the batch state to display in logs for quicker and
+    /// easier recognition
+    fn visualize(&self) -> char {
+        match self {
+            BatchState::Downloading(..) => 'D',
+            BatchState::Processing(_) => 'P',
+            BatchState::AwaitingValidation(_) => 'v',
+            BatchState::AwaitingDownload => 'd',
+            BatchState::Failed => 'F',
+            BatchState::AwaitingProcessing(..) => 'p',
+            BatchState::Poisoned => 'X',
         }
     }
 }

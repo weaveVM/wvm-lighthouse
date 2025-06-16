@@ -12,10 +12,9 @@ AARCH64_TAG = "aarch64-unknown-linux-gnu"
 BUILD_PATH_AARCH64 = "target/$(AARCH64_TAG)/release"
 
 PINNED_NIGHTLY ?= nightly
-CLIPPY_PINNED_NIGHTLY=nightly-2022-05-19
 
 # List of features to use when cross-compiling. Can be overridden via the environment.
-CROSS_FEATURES ?= gnosis,slasher-lmdb,slasher-mdbx,slasher-redb,jemalloc,wvm
+CROSS_FEATURES ?= gnosis,slasher-lmdb,slasher-mdbx,slasher-redb,jemalloc,beacon-node-leveldb,beacon-node-redb,wvm
 
 # Add wvm by default in builds
 FEATURES ?= wvm
@@ -34,7 +33,7 @@ PROFILE ?= release
 
 # List of all hard forks. This list is used to set env variables for several tests so that
 # they run for different forks.
-FORKS=phase0 altair bellatrix capella deneb electra
+FORKS=phase0 altair bellatrix capella deneb electra fulu
 
 # Extra flags for Cargo
 CARGO_INSTALL_EXTRA_FLAGS?=
@@ -64,23 +63,21 @@ install-lcli:
 # - The current user is in the `docker` group.
 #
 # The resulting binaries will be created in the `target/` directory.
-#
-# The *-portable options compile the blst library *without* the use of some
-# optimized CPU functions that may not be available on some systems. This
-# results in a more portable binary with ~20% slower BLS verification.
 build-x86_64:
-	cross build --bin lighthouse --target x86_64-unknown-linux-gnu --features "modern,$(CROSS_FEATURES)" --profile "$(CROSS_PROFILE)" --locked
-build-x86_64-portable:
 	cross build --bin lighthouse --target x86_64-unknown-linux-gnu --features "portable,$(CROSS_FEATURES)" --profile "$(CROSS_PROFILE)" --locked
 build-aarch64:
-	cross build --bin lighthouse --target aarch64-unknown-linux-gnu --features "$(CROSS_FEATURES)" --profile "$(CROSS_PROFILE)" --locked
-build-aarch64-portable:
-	cross build --bin lighthouse --target aarch64-unknown-linux-gnu --features "portable,$(CROSS_FEATURES)" --profile "$(CROSS_PROFILE)" --locked
+	# JEMALLOC_SYS_WITH_LG_PAGE=16 tells jemalloc to support up to 64-KiB
+	# pages, which are commonly used by aarch64 systems.
+	# See: https://github.com/sigp/lighthouse/issues/5244
+	JEMALLOC_SYS_WITH_LG_PAGE=16 cross build --bin lighthouse --target aarch64-unknown-linux-gnu --features "portable,$(CROSS_FEATURES)" --profile "$(CROSS_PROFILE)" --locked
 
 build-lcli-x86_64:
 	cross build --bin lcli --target x86_64-unknown-linux-gnu --features "portable" --profile "$(CROSS_PROFILE)" --locked
 build-lcli-aarch64:
-	cross build --bin lcli --target aarch64-unknown-linux-gnu --features "portable" --profile "$(CROSS_PROFILE)" --locked
+	# JEMALLOC_SYS_WITH_LG_PAGE=16 tells jemalloc to support up to 64-KiB
+	# pages, which are commonly used by aarch64 systems.
+	# See: https://github.com/sigp/lighthouse/issues/5244
+	JEMALLOC_SYS_WITH_LG_PAGE=16 cross build --bin lcli --target aarch64-unknown-linux-gnu --features "portable" --profile "$(CROSS_PROFILE)" --locked
 
 # Create a `.tar.gz` containing a binary for a specific target.
 define tarball_release_binary
@@ -99,12 +96,8 @@ build-release-tarballs:
 	[ -d $(BIN_DIR) ] || mkdir -p $(BIN_DIR)
 	$(MAKE) build-x86_64
 	$(call tarball_release_binary,$(BUILD_PATH_X86_64),$(X86_64_TAG),"")
-	$(MAKE) build-x86_64-portable
-	$(call tarball_release_binary,$(BUILD_PATH_X86_64),$(X86_64_TAG),"-portable")
 	$(MAKE) build-aarch64
 	$(call tarball_release_binary,$(BUILD_PATH_AARCH64),$(AARCH64_TAG),"")
-	$(MAKE) build-aarch64-portable
-	$(call tarball_release_binary,$(BUILD_PATH_AARCH64),$(AARCH64_TAG),"-portable")
 
 # Runs the full workspace tests in **release**, without downloading any additional
 # test vectors.
@@ -199,7 +192,7 @@ test-exec-engine:
 # test vectors.
 test: test-release
 
-# Updates the CLI help text pages in the Lighthouse book, building with Docker.
+# Updates the CLI help text pages in the Lighthouse book, building with Docker (primarily for Windows users).
 cli:
 	docker run --rm --user=root \
 	-v ${PWD}:/home/runner/actions-runner/lighthouse sigmaprime/github-runner \
@@ -220,9 +213,10 @@ test-full: cargo-fmt test-release test-debug test-ef test-exec-engine
 # Lints the code for bad style and potentially unsafe arithmetic using Clippy.
 # Clippy lints are opt-in per-crate for now. By default, everything is allowed except for performance and correctness lints.
 lint:
-	cargo clippy --workspace --tests $(EXTRA_CLIPPY_OPTS) --features "$(TEST_FEATURES)" -- \
+	cargo clippy --workspace --benches --tests $(EXTRA_CLIPPY_OPTS) --features "$(TEST_FEATURES)" -- \
 		-D clippy::fn_to_numeric_cast_any \
 		-D clippy::manual_let_else \
+		-D clippy::large_stack_frames \
 		-D warnings \
 		-A clippy::derive_partial_eq_without_eq \
 		-A clippy::upper-case-acronyms \
@@ -235,12 +229,9 @@ lint:
 lint-fix:
 	EXTRA_CLIPPY_OPTS="--fix --allow-staged --allow-dirty" $(MAKE) lint
 
-nightly-lint:
-	cp .github/custom/clippy.toml .
-	cargo +$(CLIPPY_PINNED_NIGHTLY) clippy --workspace --tests --release -- \
-		-A clippy::all \
-		-D clippy::disallowed_from_async
-	rm clippy.toml
+# Also run the lints on the optimized-only tests
+lint-full:
+	TEST_FEATURES="beacon-node-leveldb,beacon-node-redb,${TEST_FEATURES}"  RUSTFLAGS="-C debug-assertions=no $(RUSTFLAGS)" $(MAKE) lint
 
 # Runs the makefile in the `ef_tests` repo.
 #

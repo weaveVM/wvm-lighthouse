@@ -2,10 +2,10 @@ use crate::slot_data::SlotData;
 use crate::{test_utils::TestRandom, Hash256, Slot};
 use crate::{Checkpoint, ForkVersionDeserialize};
 use derivative::Derivative;
-use safe_arith::ArithError;
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
 use ssz_types::BitVector;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use superstruct::superstruct;
 use test_random_derive::TestRandom;
@@ -20,7 +20,6 @@ use super::{
 pub enum Error {
     SszTypesError(ssz_types::Error),
     AlreadySigned(usize),
-    SubnetCountIsZero(ArithError),
     IncorrectStateVariant,
     InvalidCommitteeLength,
     InvalidCommitteeIndex,
@@ -77,9 +76,9 @@ pub struct Attestation<E: EthSpec> {
     #[superstruct(only(Electra), partial_getter(rename = "aggregation_bits_electra"))]
     pub aggregation_bits: BitList<E::MaxValidatorsPerSlot>,
     pub data: AttestationData,
+    pub signature: AggregateSignature,
     #[superstruct(only(Electra))]
     pub committee_bits: BitVector<E::MaxCommitteesPerSlot>,
-    pub signature: AggregateSignature,
 }
 
 impl<E: EthSpec> Hash for Attestation<E> {
@@ -211,6 +210,13 @@ impl<E: EthSpec> Attestation<E> {
         }
     }
 
+    pub fn get_committee_indices_map(&self) -> HashSet<u64> {
+        match self {
+            Attestation::Base(att) => HashSet::from([att.data.index]),
+            Attestation::Electra(att) => att.get_committee_indices().into_iter().collect(),
+        }
+    }
+
     pub fn is_aggregation_bits_zero(&self) -> bool {
         match self {
             Attestation::Base(att) => att.aggregation_bits.is_zero(),
@@ -231,9 +237,19 @@ impl<E: EthSpec> Attestation<E> {
             Attestation::Electra(att) => att.aggregation_bits.get(index),
         }
     }
+
+    pub fn to_single_attestation_with_attester_index(
+        &self,
+        attester_index: u64,
+    ) -> Result<SingleAttestation, Error> {
+        match self {
+            Self::Base(_) => Err(Error::IncorrectStateVariant),
+            Self::Electra(attn) => attn.to_single_attestation_with_attester_index(attester_index),
+        }
+    }
 }
 
-impl<'a, E: EthSpec> AttestationRef<'a, E> {
+impl<E: EthSpec> AttestationRef<'_, E> {
     pub fn clone_as_attestation(self) -> Attestation<E> {
         match self {
             Self::Base(att) => Attestation::Base(att.clone()),
@@ -284,7 +300,19 @@ impl<'a, E: EthSpec> AttestationRef<'a, E> {
 
 impl<E: EthSpec> AttestationElectra<E> {
     pub fn committee_index(&self) -> Option<u64> {
-        self.get_committee_indices().first().cloned()
+        self.committee_bits
+            .iter()
+            .enumerate()
+            .find(|&(_, bit)| bit)
+            .map(|(index, _)| index as u64)
+    }
+
+    pub fn get_aggregation_bits(&self) -> Vec<u64> {
+        self.aggregation_bits
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bit)| if bit { Some(index as u64) } else { None })
+            .collect()
     }
 
     pub fn get_committee_indices(&self) -> Vec<u64> {
@@ -350,6 +378,22 @@ impl<E: EthSpec> AttestationElectra<E> {
             Ok(())
         }
     }
+
+    pub fn to_single_attestation_with_attester_index(
+        &self,
+        attester_index: u64,
+    ) -> Result<SingleAttestation, Error> {
+        let Some(committee_index) = self.committee_index() else {
+            return Err(Error::InvalidCommitteeIndex);
+        };
+
+        Ok(SingleAttestation {
+            committee_index,
+            attester_index,
+            data: self.data.clone(),
+            signature: self.signature.clone(),
+        })
+    }
 }
 
 impl<E: EthSpec> AttestationBase<E> {
@@ -412,13 +456,7 @@ impl<E: EthSpec> AttestationBase<E> {
     pub fn extend_aggregation_bits(
         &self,
     ) -> Result<BitList<E::MaxValidatorsPerSlot>, ssz_types::Error> {
-        let mut extended_aggregation_bits: BitList<E::MaxValidatorsPerSlot> =
-            BitList::with_capacity(self.aggregation_bits.len())?;
-
-        for (i, bit) in self.aggregation_bits.iter().enumerate() {
-            extended_aggregation_bits.set(i, bit)?;
-        }
-        Ok(extended_aggregation_bits)
+        self.aggregation_bits.resize::<E::MaxValidatorsPerSlot>()
     }
 }
 
@@ -428,7 +466,7 @@ impl<E: EthSpec> SlotData for Attestation<E> {
     }
 }
 
-impl<'a, E: EthSpec> SlotData for AttestationRef<'a, E> {
+impl<E: EthSpec> SlotData for AttestationRef<'_, E> {
     fn get_slot(&self) -> Slot {
         self.data().slot
     }
@@ -531,6 +569,28 @@ impl<E: EthSpec> ForkVersionDeserialize for Vec<Attestation<E>> {
                 .collect::<Vec<_>>())
         }
     }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Decode,
+    Encode,
+    TestRandom,
+    Derivative,
+    arbitrary::Arbitrary,
+    TreeHash,
+    PartialEq,
+)]
+pub struct SingleAttestation {
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub committee_index: u64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub attester_index: u64,
+    pub data: AttestationData,
+    pub signature: AggregateSignature,
 }
 
 #[cfg(test)]

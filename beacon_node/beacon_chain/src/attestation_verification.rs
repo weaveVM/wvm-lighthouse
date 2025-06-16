@@ -60,9 +60,9 @@ use std::borrow::Cow;
 use strum::AsRefStr;
 use tree_hash::TreeHash;
 use types::{
-    Attestation, AttestationRef, BeaconCommittee, BeaconStateError::NoCommitteeFound, ChainSpec,
-    CommitteeIndex, Epoch, EthSpec, Hash256, IndexedAttestation, SelectionProof,
-    SignedAggregateAndProof, Slot, SubnetId,
+    Attestation, AttestationData, AttestationRef, BeaconCommittee,
+    BeaconStateError::NoCommitteeFound, ChainSpec, CommitteeIndex, Epoch, EthSpec, Hash256,
+    IndexedAttestation, SelectionProof, SignedAggregateAndProof, SingleAttestation, Slot, SubnetId,
 };
 
 pub use batch::{batch_verify_aggregated_attestations, batch_verify_unaggregated_attestations};
@@ -115,6 +115,17 @@ pub enum Error {
     ///
     /// The peer has sent an invalid message.
     AggregatorNotInCommittee { aggregator_index: u64 },
+    /// The `attester_index` for a `SingleAttestation` is not a member of the committee defined
+    /// by its `beacon_block_root`, `committee_index` and `slot`.
+    ///
+    /// ## Peer scoring
+    ///
+    /// The peer has sent an invalid message.
+    AttesterNotInCommittee {
+        attester_index: u64,
+        committee_index: u64,
+        slot: Slot,
+    },
     /// The aggregator index refers to a validator index that we have not seen.
     ///
     /// ## Peer scoring
@@ -306,7 +317,7 @@ pub struct VerifiedAggregatedAttestation<'a, T: BeaconChainTypes> {
     indexed_attestation: IndexedAttestation<T::EthSpec>,
 }
 
-impl<'a, T: BeaconChainTypes> VerifiedAggregatedAttestation<'a, T> {
+impl<T: BeaconChainTypes> VerifiedAggregatedAttestation<'_, T> {
     pub fn into_indexed_attestation(self) -> IndexedAttestation<T::EthSpec> {
         self.indexed_attestation
     }
@@ -317,17 +328,27 @@ pub struct VerifiedUnaggregatedAttestation<'a, T: BeaconChainTypes> {
     attestation: AttestationRef<'a, T::EthSpec>,
     indexed_attestation: IndexedAttestation<T::EthSpec>,
     subnet_id: SubnetId,
+    validator_index: usize,
 }
 
-impl<'a, T: BeaconChainTypes> VerifiedUnaggregatedAttestation<'a, T> {
+impl<T: BeaconChainTypes> VerifiedUnaggregatedAttestation<'_, T> {
     pub fn into_indexed_attestation(self) -> IndexedAttestation<T::EthSpec> {
         self.indexed_attestation
+    }
+
+    pub fn single_attestation(&self) -> Option<SingleAttestation> {
+        Some(SingleAttestation {
+            committee_index: self.attestation.committee_index()?,
+            attester_index: self.validator_index as u64,
+            data: self.attestation.data().clone(),
+            signature: self.attestation.signature().clone(),
+        })
     }
 }
 
 /// Custom `Clone` implementation is to avoid the restrictive trait bounds applied by the usual derive
 /// macro.
-impl<'a, T: BeaconChainTypes> Clone for IndexedUnaggregatedAttestation<'a, T> {
+impl<T: BeaconChainTypes> Clone for IndexedUnaggregatedAttestation<'_, T> {
     fn clone(&self) -> Self {
         Self {
             attestation: self.attestation,
@@ -353,7 +374,7 @@ pub trait VerifiedAttestation<T: BeaconChainTypes>: Sized {
     }
 }
 
-impl<'a, T: BeaconChainTypes> VerifiedAttestation<T> for VerifiedAggregatedAttestation<'a, T> {
+impl<T: BeaconChainTypes> VerifiedAttestation<T> for VerifiedAggregatedAttestation<'_, T> {
     fn attestation(&self) -> AttestationRef<T::EthSpec> {
         self.attestation()
     }
@@ -363,7 +384,7 @@ impl<'a, T: BeaconChainTypes> VerifiedAttestation<T> for VerifiedAggregatedAttes
     }
 }
 
-impl<'a, T: BeaconChainTypes> VerifiedAttestation<T> for VerifiedUnaggregatedAttestation<'a, T> {
+impl<T: BeaconChainTypes> VerifiedAttestation<T> for VerifiedUnaggregatedAttestation<'_, T> {
     fn attestation(&self) -> AttestationRef<T::EthSpec> {
         self.attestation
     }
@@ -456,11 +477,10 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
         chain: &BeaconChain<T>,
     ) -> Result<Self, Error> {
         Self::verify_slashable(signed_aggregate, chain)
-            .map(|verified_aggregate| {
+            .inspect(|verified_aggregate| {
                 if let Some(slasher) = chain.slasher.as_ref() {
                     slasher.accept_attestation(verified_aggregate.indexed_attestation.clone());
                 }
-                verified_aggregate
             })
             .map_err(|slash_info| process_slash_info(slash_info, chain))
     }
@@ -476,7 +496,11 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
         // MAXIMUM_GOSSIP_CLOCK_DISPARITY allowance).
         //
         // We do not queue future attestations for later processing.
-        verify_propagation_slot_range(&chain.slot_clock, attestation, &chain.spec)?;
+        verify_propagation_slot_range::<_, T::EthSpec>(
+            &chain.slot_clock,
+            attestation.data(),
+            &chain.spec,
+        )?;
 
         // Check the attestation's epoch matches its target.
         if attestation.data().slot.epoch(T::EthSpec::slots_per_epoch())
@@ -808,7 +832,11 @@ impl<'a, T: BeaconChainTypes> IndexedUnaggregatedAttestation<'a, T> {
         // MAXIMUM_GOSSIP_CLOCK_DISPARITY allowance).
         //
         // We do not queue future attestations for later processing.
-        verify_propagation_slot_range(&chain.slot_clock, attestation, &chain.spec)?;
+        verify_propagation_slot_range::<_, T::EthSpec>(
+            &chain.slot_clock,
+            attestation.data(),
+            &chain.spec,
+        )?;
 
         // Check to ensure that the attestation is "unaggregated". I.e., it has exactly one
         // aggregation bit set.
@@ -892,11 +920,10 @@ impl<'a, T: BeaconChainTypes> IndexedUnaggregatedAttestation<'a, T> {
         chain: &BeaconChain<T>,
     ) -> Result<Self, Error> {
         Self::verify_slashable(attestation.to_ref(), subnet_id, chain)
-            .map(|verified_unaggregated| {
+            .inspect(|verified_unaggregated| {
                 if let Some(slasher) = chain.slasher.as_ref() {
                     slasher.accept_attestation(verified_unaggregated.indexed_attestation.clone());
                 }
-                verified_unaggregated
             })
             .map_err(|slash_info| process_slash_info(slash_info, chain))
     }
@@ -1037,6 +1064,7 @@ impl<'a, T: BeaconChainTypes> VerifiedUnaggregatedAttestation<'a, T> {
             attestation,
             indexed_attestation,
             subnet_id,
+            validator_index: validator_index as usize,
         })
     }
 
@@ -1100,6 +1128,12 @@ fn verify_head_block_is_known<T: BeaconChainTypes>(
             }
         }
 
+        if !verify_attestation_is_finalized_checkpoint_or_descendant(attestation.data(), chain) {
+            return Err(Error::HeadBlockFinalized {
+                beacon_block_root: attestation.data().beacon_block_root,
+            });
+        }
+
         Ok(block)
     } else if chain.is_pre_finalization_block(attestation.data().beacon_block_root)? {
         Err(Error::HeadBlockFinalized {
@@ -1124,10 +1158,10 @@ fn verify_head_block_is_known<T: BeaconChainTypes>(
 /// Accounts for `MAXIMUM_GOSSIP_CLOCK_DISPARITY`.
 pub fn verify_propagation_slot_range<S: SlotClock, E: EthSpec>(
     slot_clock: &S,
-    attestation: AttestationRef<E>,
+    attestation: &AttestationData,
     spec: &ChainSpec,
 ) -> Result<(), Error> {
-    let attestation_slot = attestation.data().slot;
+    let attestation_slot = attestation.slot;
     let latest_permissible_slot = slot_clock
         .now_with_future_tolerance(spec.maximum_gossip_clock_disparity())
         .ok_or(BeaconChainError::UnableToReadSlot)?;
@@ -1146,13 +1180,14 @@ pub fn verify_propagation_slot_range<S: SlotClock, E: EthSpec>(
 
     let current_fork =
         spec.fork_name_at_slot::<E>(slot_clock.now().ok_or(BeaconChainError::UnableToReadSlot)?);
-    let earliest_permissible_slot = if !current_fork.deneb_enabled() {
-        one_epoch_prior
-    // EIP-7045
-    } else {
+
+    let earliest_permissible_slot = if current_fork.deneb_enabled() {
+        // EIP-7045
         one_epoch_prior
             .epoch(E::slots_per_epoch())
             .start_slot(E::slots_per_epoch())
+    } else {
+        one_epoch_prior
     };
 
     if attestation_slot < earliest_permissible_slot {
@@ -1332,6 +1367,29 @@ pub fn verify_committee_index<E: EthSpec>(attestation: AttestationRef<E>) -> Res
     Ok(())
 }
 
+fn verify_attestation_is_finalized_checkpoint_or_descendant<T: BeaconChainTypes>(
+    attestation_data: &AttestationData,
+    chain: &BeaconChain<T>,
+) -> bool {
+    // If we have a split block newer than finalization then we also ban attestations which are not
+    // descended from that split block. It's important not to try checking `is_descendant` if
+    // finality is ahead of the split and the split block has been pruned, as `is_descendant` will
+    // return `false` in this case.
+    let fork_choice = chain.canonical_head.fork_choice_read_lock();
+    let attestation_block_root = attestation_data.beacon_block_root;
+    let finalized_slot = fork_choice
+        .finalized_checkpoint()
+        .epoch
+        .start_slot(T::EthSpec::slots_per_epoch());
+    let split = chain.store.get_split_info();
+    let is_descendant_from_split_block = split.slot == 0
+        || split.slot <= finalized_slot
+        || fork_choice.is_descendant(split.block_root, attestation_block_root);
+
+    fork_choice.is_finalized_checkpoint_or_descendant(attestation_block_root)
+        && is_descendant_from_split_block
+}
+
 /// Assists in readability.
 type CommitteesPerSlot = u64;
 
@@ -1421,19 +1479,17 @@ where
         return Err(Error::UnknownTargetRoot(target.root));
     }
 
-    chain
-        .with_committee_cache(target.root, attestation_epoch, |committee_cache, _| {
-            let committees_per_slot = committee_cache.committees_per_slot();
+    chain.with_committee_cache(target.root, attestation_epoch, |committee_cache, _| {
+        let committees_per_slot = committee_cache.committees_per_slot();
 
-            Ok(committee_cache
-                .get_beacon_committees_at_slot(attestation.data().slot)
-                .map(|committees| map_fn((committees, committees_per_slot)))
-                .unwrap_or_else(|_| {
-                    Err(Error::NoCommitteeForSlotAndIndex {
-                        slot: attestation.data().slot,
-                        index: attestation.committee_index().unwrap_or(0),
-                    })
-                }))
-        })
-        .map_err(BeaconChainError::from)?
+        Ok(committee_cache
+            .get_beacon_committees_at_slot(attestation.data().slot)
+            .map(|committees| map_fn((committees, committees_per_slot)))
+            .unwrap_or_else(|_| {
+                Err(Error::NoCommitteeForSlotAndIndex {
+                    slot: attestation.data().slot,
+                    index: attestation.committee_index().unwrap_or(0),
+                })
+            }))
+    })?
 }

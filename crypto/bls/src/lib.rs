@@ -10,7 +10,7 @@
 //!
 //! - `supranational`: the pure-assembly, highly optimized version from the `blst` crate.
 //! - `fake_crypto`: an always-returns-valid implementation that is only useful for testing
-//!     scenarios which intend to *ignore* real cryptography.
+//!   scenarios which intend to *ignore* real cryptography.
 //!
 //! This crate uses traits to reduce code-duplication between the two implementations. For example,
 //! the `GenericPublicKey` struct exported from this crate is generic across the `TPublicKey` trait
@@ -44,7 +44,8 @@ pub use zeroize_hash::ZeroizeHash;
 #[cfg(feature = "supranational")]
 use blst::BLST_ERROR as BlstError;
 
-pub type Hash256 = ethereum_types::H256;
+pub type Hash256 = fixed_bytes::Hash256;
+pub use fixed_bytes::FixedBytesExtended;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {

@@ -14,8 +14,8 @@ use store::iter::RootsIterator;
 use store::{Error, ItemStore, StoreItem, StoreOp};
 pub use store::{HotColdDB, MemoryStore};
 use types::{
-    BeaconState, BeaconStateError, BeaconStateHash, Checkpoint, Epoch, EthSpec, Hash256,
-    SignedBeaconBlockHash, Slot,
+    BeaconState, BeaconStateError, BeaconStateHash, Checkpoint, Epoch, EthSpec, FixedBytesExtended,
+    Hash256, SignedBeaconBlockHash, Slot,
 };
 
 /// Compact at least this frequently, finalization permitting (7 days).
@@ -24,6 +24,12 @@ const MAX_COMPACTION_PERIOD_SECONDS: u64 = 604800;
 const MIN_COMPACTION_PERIOD_SECONDS: u64 = 7200;
 /// Compact after a large finality gap, if we respect `MIN_COMPACTION_PERIOD_SECONDS`.
 const COMPACTION_FINALITY_DISTANCE: u64 = 1024;
+/// Maximum number of blocks applied in each reconstruction burst.
+///
+/// This limits the amount of time that the finalization migration is paused for. We set this
+/// conservatively because pausing the finalization migration for too long can cause hot state
+/// cache misses and excessive disk use.
+const BLOCKS_PER_RECONSTRUCTION: usize = 1024;
 
 /// Default number of epochs to wait between finalization migrations.
 pub const DEFAULT_EPOCHS_PER_MIGRATION: u64 = 1;
@@ -118,14 +124,23 @@ pub enum Notification {
     Finalization(FinalizationNotification),
     Reconstruction,
     PruneBlobs(Epoch),
+    ManualFinalization(ManualFinalizationNotification),
+    ManualCompaction,
+}
+
+pub struct ManualFinalizationNotification {
+    pub state_root: BeaconStateHash,
+    pub checkpoint: Checkpoint,
+    pub head_tracker: Arc<HeadTracker>,
+    pub genesis_block_root: Hash256,
 }
 
 pub struct FinalizationNotification {
-    finalized_state_root: BeaconStateHash,
-    finalized_checkpoint: Checkpoint,
-    head_tracker: Arc<HeadTracker>,
-    prev_migration: Arc<Mutex<PrevMigration>>,
-    genesis_block_root: Hash256,
+    pub finalized_state_root: BeaconStateHash,
+    pub finalized_checkpoint: Checkpoint,
+    pub head_tracker: Arc<HeadTracker>,
+    pub prev_migration: Arc<Mutex<PrevMigration>>,
+    pub genesis_block_root: Hash256,
 }
 
 impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Hot, Cold> {
@@ -184,11 +199,29 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
         Ok(())
     }
 
+    pub fn process_manual_compaction(&self) {
+        if let Some(Notification::ManualCompaction) =
+            self.send_background_notification(Notification::ManualCompaction)
+        {
+            Self::run_manual_compaction(self.db.clone(), &self.log);
+        }
+    }
+
+    pub fn process_manual_finalization(&self, notif: ManualFinalizationNotification) {
+        if let Some(Notification::ManualFinalization(notif)) =
+            self.send_background_notification(Notification::ManualFinalization(notif))
+        {
+            Self::run_manual_migration(self.db.clone(), notif, &self.log);
+        }
+    }
+
     pub fn process_reconstruction(&self) {
         if let Some(Notification::Reconstruction) =
             self.send_background_notification(Notification::Reconstruction)
         {
-            Self::run_reconstruction(self.db.clone(), &self.log);
+            // If we are running in foreground mode (as in tests), then this will just run a single
+            // batch. We may need to tweak this in future.
+            Self::run_reconstruction(self.db.clone(), None, &self.log);
         }
     }
 
@@ -200,13 +233,34 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
         }
     }
 
-    pub fn run_reconstruction(db: Arc<HotColdDB<E, Hot, Cold>>, log: &Logger) {
-        if let Err(e) = db.reconstruct_historic_states() {
-            error!(
-                log,
-                "State reconstruction failed";
-                "error" => ?e,
-            );
+    pub fn run_reconstruction(
+        db: Arc<HotColdDB<E, Hot, Cold>>,
+        opt_tx: Option<mpsc::Sender<Notification>>,
+        log: &Logger,
+    ) {
+        match db.reconstruct_historic_states(Some(BLOCKS_PER_RECONSTRUCTION)) {
+            Ok(()) => {
+                // Schedule another reconstruction batch if required and we have access to the
+                // channel for requeueing.
+                if let Some(tx) = opt_tx {
+                    if !db.get_anchor_info().all_historic_states_stored() {
+                        if let Err(e) = tx.send(Notification::Reconstruction) {
+                            error!(
+                                log,
+                                "Unable to requeue reconstruction notification";
+                                "error" => ?e
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!(
+                    log,
+                    "State reconstruction failed";
+                    "error" => ?e,
+                );
+            }
         }
     }
 
@@ -260,6 +314,26 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
         }
     }
 
+    fn run_manual_migration(
+        db: Arc<HotColdDB<E, Hot, Cold>>,
+        notif: ManualFinalizationNotification,
+        log: &Logger,
+    ) {
+        // We create a "dummy" prev migration
+        let prev_migration = PrevMigration {
+            epoch: Epoch::new(1),
+            epochs_per_migration: 2,
+        };
+        let notif = FinalizationNotification {
+            finalized_state_root: notif.state_root,
+            finalized_checkpoint: notif.checkpoint,
+            head_tracker: notif.head_tracker,
+            prev_migration: Arc::new(prev_migration.into()),
+            genesis_block_root: notif.genesis_block_root,
+        };
+        Self::run_migration(db, notif, log);
+    }
+
     /// Perform the actual work of `process_finalization`.
     fn run_migration(
         db: Arc<HotColdDB<E, Hot, Cold>>,
@@ -291,7 +365,8 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
         let finalized_state_root = notif.finalized_state_root;
         let finalized_block_root = notif.finalized_checkpoint.root;
 
-        let finalized_state = match db.get_state(&finalized_state_root.into(), None) {
+        // The enshrined finalized state should be in the state cache.
+        let finalized_state = match db.get_state(&finalized_state_root.into(), None, true) {
             Ok(Some(state)) => state,
             other => {
                 error!(
@@ -380,6 +455,15 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
         debug!(log, "Database consolidation complete");
     }
 
+    fn run_manual_compaction(db: Arc<HotColdDB<E, Hot, Cold>>, log: &Logger) {
+        debug!(log, "Running manual compaction");
+        if let Err(e) = db.compact() {
+            warn!(log, "Database compaction failed"; "error" => format!("{:?}", e));
+        } else {
+            debug!(log, "Manual compaction completed");
+        }
+    }
+
     /// Spawn a new child thread to run the migration process.
     ///
     /// Return a channel handle for sending requests to the thread.
@@ -388,20 +472,35 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
         log: Logger,
     ) -> (mpsc::Sender<Notification>, thread::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel();
+        let inner_tx = tx.clone();
         let thread = thread::spawn(move || {
             while let Ok(notif) = rx.recv() {
                 let mut reconstruction_notif = None;
                 let mut finalization_notif = None;
+                let mut manual_finalization_notif = None;
+                let mut manual_compaction_notif = None;
                 let mut prune_blobs_notif = None;
                 match notif {
                     Notification::Reconstruction => reconstruction_notif = Some(notif),
                     Notification::Finalization(fin) => finalization_notif = Some(fin),
+                    Notification::ManualFinalization(fin) => manual_finalization_notif = Some(fin),
                     Notification::PruneBlobs(dab) => prune_blobs_notif = Some(dab),
+                    Notification::ManualCompaction => manual_compaction_notif = Some(notif),
                 }
                 // Read the rest of the messages in the channel, taking the best of each type.
                 for notif in rx.try_iter() {
                     match notif {
                         Notification::Reconstruction => reconstruction_notif = Some(notif),
+                        Notification::ManualCompaction => manual_compaction_notif = Some(notif),
+                        Notification::ManualFinalization(fin) => {
+                            if let Some(current) = manual_finalization_notif.as_mut() {
+                                if fin.checkpoint.epoch > current.checkpoint.epoch {
+                                    *current = fin;
+                                }
+                            } else {
+                                manual_finalization_notif = Some(fin);
+                            }
+                        }
                         Notification::Finalization(fin) => {
                             if let Some(current) = finalization_notif.as_mut() {
                                 if fin.finalized_checkpoint.epoch
@@ -418,16 +517,23 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
                         }
                     }
                 }
-                // If reconstruction is on-going, ignore finalization migration and blob pruning.
+                // Run finalization and blob pruning migrations first, then a reconstruction batch.
+                // This prevents finalization from being starved while reconstruciton runs (a
+                // problem in previous LH versions).
+                if let Some(fin) = finalization_notif {
+                    Self::run_migration(db.clone(), fin, &log);
+                }
+                if let Some(fin) = manual_finalization_notif {
+                    Self::run_manual_migration(db.clone(), fin, &log);
+                }
+                if let Some(dab) = prune_blobs_notif {
+                    Self::run_prune_blobs(db.clone(), dab, &log);
+                }
                 if reconstruction_notif.is_some() {
-                    Self::run_reconstruction(db.clone(), &log);
-                } else {
-                    if let Some(fin) = finalization_notif {
-                        Self::run_migration(db.clone(), fin, &log);
-                    }
-                    if let Some(dab) = prune_blobs_notif {
-                        Self::run_prune_blobs(db.clone(), dab, &log);
-                    }
+                    Self::run_reconstruction(db.clone(), Some(inner_tx.clone()), &log);
+                }
+                if manual_compaction_notif.is_some() {
+                    Self::run_manual_compaction(db.clone(), &log);
                 }
             }
         });
@@ -676,6 +782,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
                     StoreOp::DeleteBlock(block_root),
                     StoreOp::DeleteExecutionPayload(block_root),
                     StoreOp::DeleteBlobs(block_root),
+                    StoreOp::DeleteSyncCommitteeBranch(block_root),
                 ]
             })
             .chain(

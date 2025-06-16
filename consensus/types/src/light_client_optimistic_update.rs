@@ -2,7 +2,8 @@ use super::{EthSpec, ForkName, ForkVersionDeserialize, LightClientHeader, Slot, 
 use crate::test_utils::TestRandom;
 use crate::{
     light_client_update::*, ChainSpec, LightClientHeaderAltair, LightClientHeaderCapella,
-    LightClientHeaderDeneb, LightClientHeaderElectra, SignedBeaconBlock,
+    LightClientHeaderDeneb, LightClientHeaderElectra, LightClientHeaderFulu,
+    SignedBlindedBeaconBlock,
 };
 use derivative::Derivative;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -18,7 +19,7 @@ use tree_hash_derive::TreeHash;
 /// A LightClientOptimisticUpdate is the update we send on each slot,
 /// it is based off the current unfinalized epoch is verified only against BLS signature.
 #[superstruct(
-    variants(Altair, Capella, Deneb, Electra),
+    variants(Altair, Capella, Deneb, Electra, Fulu),
     variant_attributes(
         derive(
             Debug,
@@ -55,6 +56,8 @@ pub struct LightClientOptimisticUpdate<E: EthSpec> {
     pub attested_header: LightClientHeaderDeneb<E>,
     #[superstruct(only(Electra), partial_getter(rename = "attested_header_electra"))]
     pub attested_header: LightClientHeaderElectra<E>,
+    #[superstruct(only(Fulu), partial_getter(rename = "attested_header_fulu"))]
+    pub attested_header: LightClientHeaderFulu<E>,
     /// current sync aggregate
     pub sync_aggregate: SyncAggregate<E>,
     /// Slot of the sync aggregated signature
@@ -63,7 +66,7 @@ pub struct LightClientOptimisticUpdate<E: EthSpec> {
 
 impl<E: EthSpec> LightClientOptimisticUpdate<E> {
     pub fn new(
-        attested_block: &SignedBeaconBlock<E>,
+        attested_block: &SignedBlindedBeaconBlock<E>,
         sync_aggregate: SyncAggregate<E>,
         signature_slot: Slot,
         chain_spec: &ChainSpec,
@@ -102,6 +105,13 @@ impl<E: EthSpec> LightClientOptimisticUpdate<E> {
                 sync_aggregate,
                 signature_slot,
             }),
+            ForkName::Fulu => Self::Fulu(LightClientOptimisticUpdateFulu {
+                attested_header: LightClientHeaderFulu::block_to_light_client_header(
+                    attested_block,
+                )?,
+                sync_aggregate,
+                signature_slot,
+            }),
             ForkName::Base => return Err(Error::AltairForkNotActive),
         };
 
@@ -117,6 +127,7 @@ impl<E: EthSpec> LightClientOptimisticUpdate<E> {
             Self::Capella(_) => func(ForkName::Capella),
             Self::Deneb(_) => func(ForkName::Deneb),
             Self::Electra(_) => func(ForkName::Electra),
+            Self::Fulu(_) => func(ForkName::Fulu),
         }
     }
 
@@ -155,6 +166,7 @@ impl<E: EthSpec> LightClientOptimisticUpdate<E> {
             ForkName::Electra => {
                 Self::Electra(LightClientOptimisticUpdateElectra::from_ssz_bytes(bytes)?)
             }
+            ForkName::Fulu => Self::Fulu(LightClientOptimisticUpdateFulu::from_ssz_bytes(bytes)?),
             ForkName::Base => {
                 return Err(ssz::DecodeError::BytesInvalid(format!(
                     "LightClientOptimisticUpdate decoding for {fork_name} not implemented"
@@ -175,8 +187,22 @@ impl<E: EthSpec> LightClientOptimisticUpdate<E> {
             ForkName::Capella => <LightClientOptimisticUpdateCapella<E> as Encode>::ssz_fixed_len(),
             ForkName::Deneb => <LightClientOptimisticUpdateDeneb<E> as Encode>::ssz_fixed_len(),
             ForkName::Electra => <LightClientOptimisticUpdateElectra<E> as Encode>::ssz_fixed_len(),
+            ForkName::Fulu => <LightClientOptimisticUpdateFulu<E> as Encode>::ssz_fixed_len(),
         };
         fixed_len + LightClientHeader::<E>::ssz_max_var_len_for_fork(fork_name)
+    }
+
+    // Implements spec prioritization rules:
+    // > Full nodes SHOULD provide the LightClientOptimisticUpdate with the highest attested_header.beacon.slot (if multiple, highest signature_slot)
+    //
+    // ref: https://github.com/ethereum/consensus-specs/blob/113c58f9bf9c08867f6f5f633c4d98e0364d612a/specs/altair/light-client/full-node.md#create_light_client_optimistic_update
+    pub fn is_latest(&self, attested_slot: Slot, signature_slot: Slot) -> bool {
+        let prev_slot = self.get_slot();
+        if attested_slot > prev_slot {
+            true
+        } else {
+            attested_slot == prev_slot && signature_slot > *self.signature_slot()
+        }
     }
 }
 
@@ -185,23 +211,50 @@ impl<E: EthSpec> ForkVersionDeserialize for LightClientOptimisticUpdate<E> {
         value: Value,
         fork_name: ForkName,
     ) -> Result<Self, D::Error> {
-        match fork_name {
-            ForkName::Base => Err(serde::de::Error::custom(format!(
-                "LightClientOptimisticUpdate failed to deserialize: unsupported fork '{}'",
-                fork_name
-            ))),
-            _ => Ok(
+        if fork_name.altair_enabled() {
+            Ok(
                 serde_json::from_value::<LightClientOptimisticUpdate<E>>(value)
                     .map_err(serde::de::Error::custom),
-            )?,
+            )?
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "LightClientOptimisticUpdate failed to deserialize: unsupported fork '{}'",
+                fork_name
+            )))
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::MainnetEthSpec;
+    // `ssz_tests!` can only be defined once per namespace
+    #[cfg(test)]
+    mod altair {
+        use crate::{LightClientOptimisticUpdateAltair, MainnetEthSpec};
+        ssz_tests!(LightClientOptimisticUpdateAltair<MainnetEthSpec>);
+    }
 
-    ssz_tests!(LightClientOptimisticUpdateDeneb<MainnetEthSpec>);
+    #[cfg(test)]
+    mod capella {
+        use crate::{LightClientOptimisticUpdateCapella, MainnetEthSpec};
+        ssz_tests!(LightClientOptimisticUpdateCapella<MainnetEthSpec>);
+    }
+
+    #[cfg(test)]
+    mod deneb {
+        use crate::{LightClientOptimisticUpdateDeneb, MainnetEthSpec};
+        ssz_tests!(LightClientOptimisticUpdateDeneb<MainnetEthSpec>);
+    }
+
+    #[cfg(test)]
+    mod electra {
+        use crate::{LightClientOptimisticUpdateElectra, MainnetEthSpec};
+        ssz_tests!(LightClientOptimisticUpdateElectra<MainnetEthSpec>);
+    }
+
+    #[cfg(test)]
+    mod fulu {
+        use crate::{LightClientOptimisticUpdateFulu, MainnetEthSpec};
+        ssz_tests!(LightClientOptimisticUpdateFulu<MainnetEthSpec>);
+    }
 }

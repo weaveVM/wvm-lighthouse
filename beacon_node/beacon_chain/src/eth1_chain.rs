@@ -10,6 +10,7 @@ use state_processing::per_block_processing::get_new_eth1_data;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use store::{DBColumn, Error as StoreError, StoreItem};
 use task_executor::TaskExecutor;
@@ -106,8 +107,7 @@ fn get_sync_status<E: EthSpec>(
 
         // Determine how many voting periods are contained in distance between
         // now and genesis, rounding up.
-        let voting_periods_past =
-            (seconds_till_genesis + voting_period_duration - 1) / voting_period_duration;
+        let voting_periods_past = seconds_till_genesis.div_ceil(voting_period_duration);
 
         // Return the start time of the current voting period*.
         //
@@ -153,7 +153,7 @@ fn get_sync_status<E: EthSpec>(
     // Lighthouse is "cached and ready" when it has cached enough blocks to cover the start of the
     // current voting period.
     let lighthouse_is_cached_and_ready =
-        latest_cached_block_timestamp.map_or(false, |t| t >= voting_target_timestamp);
+        latest_cached_block_timestamp.is_some_and(|t| t >= voting_target_timestamp);
 
     Some(Eth1SyncStatusData {
         head_block_number,
@@ -284,7 +284,7 @@ where
         ssz_container: &SszEth1,
         config: Eth1Config,
         log: &Logger,
-        spec: ChainSpec,
+        spec: Arc<ChainSpec>,
     ) -> Result<Self, String> {
         let backend =
             Eth1ChainBackend::from_bytes(&ssz_container.backend_bytes, config, log.clone(), spec)?;
@@ -355,7 +355,7 @@ pub trait Eth1ChainBackend<E: EthSpec>: Sized + Send + Sync {
         bytes: &[u8],
         config: Eth1Config,
         log: Logger,
-        spec: ChainSpec,
+        spec: Arc<ChainSpec>,
     ) -> Result<Self, String>;
 }
 
@@ -369,6 +369,12 @@ pub struct DummyEth1ChainBackend<E: EthSpec>(PhantomData<E>);
 impl<E: EthSpec> Eth1ChainBackend<E> for DummyEth1ChainBackend<E> {
     /// Produce some deterministic junk based upon the current epoch.
     fn eth1_data(&self, state: &BeaconState<E>, _spec: &ChainSpec) -> Result<Eth1Data, Error> {
+        // [New in Electra:EIP6110]
+        if let Ok(deposit_requests_start_index) = state.deposit_requests_start_index() {
+            if state.eth1_deposit_index() == deposit_requests_start_index {
+                return Ok(state.eth1_data().clone());
+            }
+        }
         let current_epoch = state.current_epoch();
         let slots_per_voting_period = E::slots_per_eth1_voting_period() as u64;
         let current_voting_period: u64 = current_epoch.as_u64() / slots_per_voting_period;
@@ -413,7 +419,7 @@ impl<E: EthSpec> Eth1ChainBackend<E> for DummyEth1ChainBackend<E> {
         _bytes: &[u8],
         _config: Eth1Config,
         _log: Logger,
-        _spec: ChainSpec,
+        _spec: Arc<ChainSpec>,
     ) -> Result<Self, String> {
         Ok(Self(PhantomData))
     }
@@ -441,7 +447,7 @@ impl<E: EthSpec> CachingEth1Backend<E> {
     /// Instantiates `self` with empty caches.
     ///
     /// Does not connect to the eth1 node or start any tasks to keep the cache updated.
-    pub fn new(config: Eth1Config, log: Logger, spec: ChainSpec) -> Result<Self, String> {
+    pub fn new(config: Eth1Config, log: Logger, spec: Arc<ChainSpec>) -> Result<Self, String> {
         Ok(Self {
             core: HttpService::new(config, log.clone(), spec)
                 .map_err(|e| format!("Failed to create eth1 http service: {:?}", e))?,
@@ -467,6 +473,12 @@ impl<E: EthSpec> CachingEth1Backend<E> {
 
 impl<E: EthSpec> Eth1ChainBackend<E> for CachingEth1Backend<E> {
     fn eth1_data(&self, state: &BeaconState<E>, spec: &ChainSpec) -> Result<Eth1Data, Error> {
+        // [New in Electra:EIP6110]
+        if let Ok(deposit_requests_start_index) = state.deposit_requests_start_index() {
+            if state.eth1_deposit_index() == deposit_requests_start_index {
+                return Ok(state.eth1_data().clone());
+            }
+        }
         let period = E::SlotsPerEth1VotingPeriod::to_u64();
         let voting_period_start_slot = (state.slot() / period) * period;
         let voting_period_start_seconds = slot_start_seconds(
@@ -475,10 +487,10 @@ impl<E: EthSpec> Eth1ChainBackend<E> for CachingEth1Backend<E> {
             voting_period_start_slot,
         );
 
-        let blocks = self.core.blocks().read();
-
-        let votes_to_consider =
-            get_votes_to_consider(blocks.iter(), voting_period_start_seconds, spec);
+        let votes_to_consider = {
+            let blocks = self.core.blocks().read();
+            get_votes_to_consider(blocks.iter(), voting_period_start_seconds, spec)
+        };
 
         trace!(
             self.log,
@@ -596,7 +608,7 @@ impl<E: EthSpec> Eth1ChainBackend<E> for CachingEth1Backend<E> {
         bytes: &[u8],
         config: Eth1Config,
         log: Logger,
-        spec: ChainSpec,
+        spec: Arc<ChainSpec>,
     ) -> Result<Self, String> {
         let inner = HttpService::from_bytes(bytes, config, log.clone(), spec)?;
         Ok(Self {
@@ -685,8 +697,7 @@ fn is_candidate_block(block: &Eth1Block, period_start: u64, spec: &ChainSpec) ->
 #[cfg(test)]
 mod test {
     use super::*;
-    use environment::null_logger;
-    use types::{DepositData, MinimalEthSpec, Signature};
+    use types::{DepositData, FixedBytesExtended, MinimalEthSpec, Signature};
 
     type E = MinimalEthSpec;
 
@@ -743,6 +754,7 @@ mod test {
     mod eth1_chain_json_backend {
         use super::*;
         use eth1::DepositLog;
+        use logging::test_logger;
         use types::{test_utils::generate_deterministic_keypair, MainnetEthSpec};
 
         fn get_eth1_chain() -> Eth1Chain<CachingEth1Backend<E>, E> {
@@ -750,9 +762,10 @@ mod test {
                 ..Eth1Config::default()
             };
 
-            let log = null_logger().unwrap();
+            let log = test_logger();
             Eth1Chain::new(
-                CachingEth1Backend::new(eth1_config, log, MainnetEthSpec::default_spec()).unwrap(),
+                CachingEth1Backend::new(eth1_config, log, Arc::new(MainnetEthSpec::default_spec()))
+                    .unwrap(),
             )
         }
 

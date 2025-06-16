@@ -27,8 +27,6 @@ pub struct BasePreset {
     #[serde(with = "serde_utils::quoted_u64")]
     pub hysteresis_upward_multiplier: u64,
     #[serde(with = "serde_utils::quoted_u64")]
-    pub safe_slots_to_update_justified: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
     pub min_deposit_amount: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub max_effective_balance: u64,
@@ -90,7 +88,6 @@ impl BasePreset {
             hysteresis_quotient: spec.hysteresis_quotient,
             hysteresis_downward_multiplier: spec.hysteresis_downward_multiplier,
             hysteresis_upward_multiplier: spec.hysteresis_upward_multiplier,
-            safe_slots_to_update_justified: spec.safe_slots_to_update_justified,
             min_deposit_amount: spec.min_deposit_amount,
             max_effective_balance: spec.max_effective_balance,
             effective_balance_increment: spec.effective_balance_increment,
@@ -209,8 +206,6 @@ impl CapellaPreset {
 #[serde(rename_all = "UPPERCASE")]
 pub struct DenebPreset {
     #[serde(with = "serde_utils::quoted_u64")]
-    pub max_blobs_per_block: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
     pub max_blob_commitments_per_block: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub field_elements_per_blob: u64,
@@ -219,7 +214,6 @@ pub struct DenebPreset {
 impl DenebPreset {
     pub fn from_chain_spec<E: EthSpec>(_spec: &ChainSpec) -> Self {
         Self {
-            max_blobs_per_block: E::max_blobs_per_block() as u64,
             max_blob_commitments_per_block: E::max_blob_commitments_per_block() as u64,
             field_elements_per_blob: E::field_elements_per_blob() as u64,
         }
@@ -233,28 +227,36 @@ pub struct ElectraPreset {
     pub min_activation_balance: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub max_effective_balance_electra: u64,
+
     #[serde(with = "serde_utils::quoted_u64")]
     pub min_slashing_penalty_quotient_electra: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub whistleblower_reward_quotient_electra: u64,
+
     #[serde(with = "serde_utils::quoted_u64")]
-    pub max_pending_partials_per_withdrawals_sweep: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
-    pub pending_balance_deposits_limit: u64,
+    pub pending_deposits_limit: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub pending_partial_withdrawals_limit: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub pending_consolidations_limit: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
-    pub max_consolidations: u64,
-    #[serde(with = "serde_utils::quoted_u64")]
-    pub max_deposit_requests_per_payload: u64,
+
     #[serde(with = "serde_utils::quoted_u64")]
     pub max_attester_slashings_electra: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub max_attestations_electra: u64,
+
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub max_deposit_requests_per_payload: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub max_withdrawal_requests_per_payload: u64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub max_consolidation_requests_per_payload: u64,
+
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub max_pending_partials_per_withdrawals_sweep: u64,
+
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub max_pending_deposits_per_epoch: u64,
 }
 
 impl ElectraPreset {
@@ -262,25 +264,33 @@ impl ElectraPreset {
         Self {
             min_activation_balance: spec.min_activation_balance,
             max_effective_balance_electra: spec.max_effective_balance_electra,
+
             min_slashing_penalty_quotient_electra: spec.min_slashing_penalty_quotient_electra,
             whistleblower_reward_quotient_electra: spec.whistleblower_reward_quotient_electra,
-            max_pending_partials_per_withdrawals_sweep: spec
-                .max_pending_partials_per_withdrawals_sweep,
-            pending_balance_deposits_limit: E::pending_balance_deposits_limit() as u64,
+
+            pending_deposits_limit: E::pending_deposits_limit() as u64,
             pending_partial_withdrawals_limit: E::pending_partial_withdrawals_limit() as u64,
             pending_consolidations_limit: E::pending_consolidations_limit() as u64,
-            max_consolidations: E::max_consolidations() as u64,
-            max_deposit_requests_per_payload: E::max_deposit_requests_per_payload() as u64,
+
             max_attester_slashings_electra: E::max_attester_slashings_electra() as u64,
             max_attestations_electra: E::max_attestations_electra() as u64,
+
+            max_deposit_requests_per_payload: E::max_deposit_requests_per_payload() as u64,
             max_withdrawal_requests_per_payload: E::max_withdrawal_requests_per_payload() as u64,
+            max_consolidation_requests_per_payload: E::max_consolidation_requests_per_payload()
+                as u64,
+
+            max_pending_partials_per_withdrawals_sweep: spec
+                .max_pending_partials_per_withdrawals_sweep,
+
+            max_pending_deposits_per_epoch: E::max_pending_deposits_per_epoch() as u64,
         }
     }
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub struct Eip7594Preset {
+pub struct FuluPreset {
     #[serde(with = "serde_utils::quoted_u64")]
     pub field_elements_per_cell: u64,
     #[serde(with = "serde_utils::quoted_u64")]
@@ -289,7 +299,7 @@ pub struct Eip7594Preset {
     pub kzg_commitments_inclusion_proof_depth: u64,
 }
 
-impl Eip7594Preset {
+impl FuluPreset {
     pub fn from_chain_spec<E: EthSpec>(_spec: &ChainSpec) -> Self {
         Self {
             field_elements_per_cell: E::field_elements_per_cell() as u64,
@@ -345,8 +355,8 @@ mod test {
         let electra: ElectraPreset = preset_from_file(&preset_name, "electra.yaml");
         assert_eq!(electra, ElectraPreset::from_chain_spec::<E>(&spec));
 
-        let eip7594: Eip7594Preset = preset_from_file(&preset_name, "eip7594.yaml");
-        assert_eq!(eip7594, Eip7594Preset::from_chain_spec::<E>(&spec));
+        let fulu: FuluPreset = preset_from_file(&preset_name, "fulu.yaml");
+        assert_eq!(fulu, FuluPreset::from_chain_spec::<E>(&spec));
     }
 
     #[test]

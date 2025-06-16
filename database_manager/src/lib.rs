@@ -6,7 +6,7 @@ use beacon_chain::{
     builder::Witness, eth1_chain::CachingEth1Backend, schema_change::migrate_schema,
     slot_clock::SystemTimeSlotClock,
 };
-use beacon_node::{get_data_dir, get_slots_per_restore_point, ClientConfig};
+use beacon_node::{get_data_dir, ClientConfig};
 use clap::ArgMatches;
 use clap::ValueEnum;
 use cli::{Compact, Inspect};
@@ -16,11 +16,12 @@ use slog::{info, warn, Logger};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use store::metadata::STATE_UPPER_LIMIT_NO_RETAIN;
+use store::KeyValueStore;
 use store::{
+    database::interface::BeaconNodeBackend,
     errors::Error,
     metadata::{SchemaVersion, CURRENT_SCHEMA_VERSION},
-    DBColumn, HotColdDB, KeyValueStore, LevelDB,
+    DBColumn, HotColdDB,
 };
 use strum::{EnumString, EnumVariantNames};
 use types::{BeaconState, EthSpec, Slot};
@@ -39,14 +40,9 @@ fn parse_client_config<E: EthSpec>(
     client_config
         .blobs_db_path
         .clone_from(&database_manager_config.blobs_dir);
-
-    let (sprp, sprp_explicit) =
-        get_slots_per_restore_point::<E>(database_manager_config.slots_per_restore_point)?;
-
-    client_config.store.slots_per_restore_point = sprp;
-    client_config.store.slots_per_restore_point_set_explicitly = sprp_explicit;
     client_config.store.blob_prune_margin_epochs = database_manager_config.blob_prune_margin_epochs;
-
+    client_config.store.hierarchy_config = database_manager_config.hierarchy_exponents.clone();
+    client_config.store.backend = database_manager_config.backend;
     Ok(client_config)
 }
 
@@ -61,7 +57,7 @@ pub fn display_db_version<E: EthSpec>(
     let blobs_path = client_config.get_blobs_db_path();
 
     let mut version = CURRENT_SCHEMA_VERSION;
-    HotColdDB::<E, LevelDB<E>, LevelDB<E>>::open(
+    HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
         &hot_path,
         &cold_path,
         &blobs_path,
@@ -151,11 +147,14 @@ pub fn inspect_db<E: EthSpec>(
     let mut num_keys = 0;
 
     let sub_db = if inspect_config.freezer {
-        LevelDB::<E>::open(&cold_path).map_err(|e| format!("Unable to open freezer DB: {e:?}"))?
+        BeaconNodeBackend::<E>::open(&client_config.store, &cold_path)
+            .map_err(|e| format!("Unable to open freezer DB: {e:?}"))?
     } else if inspect_config.blobs_db {
-        LevelDB::<E>::open(&blobs_path).map_err(|e| format!("Unable to open blobs DB: {e:?}"))?
+        BeaconNodeBackend::<E>::open(&client_config.store, &blobs_path)
+            .map_err(|e| format!("Unable to open blobs DB: {e:?}"))?
     } else {
-        LevelDB::<E>::open(&hot_path).map_err(|e| format!("Unable to open hot DB: {e:?}"))?
+        BeaconNodeBackend::<E>::open(&client_config.store, &hot_path)
+            .map_err(|e| format!("Unable to open hot DB: {e:?}"))?
     };
 
     let skip = inspect_config.skip.unwrap_or(0);
@@ -269,11 +268,20 @@ pub fn compact_db<E: EthSpec>(
     let column = compact_config.column;
 
     let (sub_db, db_name) = if compact_config.freezer {
-        (LevelDB::<E>::open(&cold_path)?, "freezer_db")
+        (
+            BeaconNodeBackend::<E>::open(&client_config.store, &cold_path)?,
+            "freezer_db",
+        )
     } else if compact_config.blobs_db {
-        (LevelDB::<E>::open(&blobs_path)?, "blobs_db")
+        (
+            BeaconNodeBackend::<E>::open(&client_config.store, &blobs_path)?,
+            "blobs_db",
+        )
     } else {
-        (LevelDB::<E>::open(&hot_path)?, "hot_db")
+        (
+            BeaconNodeBackend::<E>::open(&client_config.store, &hot_path)?,
+            "hot_db",
+        )
     };
     info!(
         log,
@@ -298,17 +306,18 @@ fn parse_migrate_config(migrate_config: &Migrate) -> Result<MigrateConfig, Strin
 pub fn migrate_db<E: EthSpec>(
     migrate_config: MigrateConfig,
     client_config: ClientConfig,
+    mut genesis_state: BeaconState<E>,
     runtime_context: &RuntimeContext<E>,
     log: Logger,
 ) -> Result<(), Error> {
-    let spec = &runtime_context.eth2_config.spec;
+    let spec = runtime_context.eth2_config.spec.clone();
     let hot_path = client_config.get_db_path();
     let cold_path = client_config.get_freezer_db_path();
     let blobs_path = client_config.get_blobs_db_path();
 
     let mut from = CURRENT_SCHEMA_VERSION;
     let to = migrate_config.to;
-    let db = HotColdDB::<E, LevelDB<E>, LevelDB<E>>::open(
+    let db = HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
         &hot_path,
         &cold_path,
         &blobs_path,
@@ -328,13 +337,13 @@ pub fn migrate_db<E: EthSpec>(
         "to" => to.as_u64(),
     );
 
+    let genesis_state_root = genesis_state.canonical_root()?;
     migrate_schema::<Witness<SystemTimeSlotClock, CachingEth1Backend<E>, _, _, _>>(
         db,
-        client_config.eth1.deposit_contract_deploy_block,
+        Some(genesis_state_root),
         from,
         to,
         log,
-        spec,
     )
 }
 
@@ -348,7 +357,7 @@ pub fn prune_payloads<E: EthSpec>(
     let cold_path = client_config.get_freezer_db_path();
     let blobs_path = client_config.get_blobs_db_path();
 
-    let db = HotColdDB::<E, LevelDB<E>, LevelDB<E>>::open(
+    let db = HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
         &hot_path,
         &cold_path,
         &blobs_path,
@@ -374,7 +383,7 @@ pub fn prune_blobs<E: EthSpec>(
     let cold_path = client_config.get_freezer_db_path();
     let blobs_path = client_config.get_blobs_db_path();
 
-    let db = HotColdDB::<E, LevelDB<E>, LevelDB<E>>::open(
+    let db = HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
         &hot_path,
         &cold_path,
         &blobs_path,
@@ -411,7 +420,7 @@ pub fn prune_states<E: EthSpec>(
     let cold_path = client_config.get_freezer_db_path();
     let blobs_path = client_config.get_blobs_db_path();
 
-    let db = HotColdDB::<E, LevelDB<E>, LevelDB<E>>::open(
+    let db = HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
         &hot_path,
         &cold_path,
         &blobs_path,
@@ -426,8 +435,7 @@ pub fn prune_states<E: EthSpec>(
     // correct network, and that we don't end up storing the wrong genesis state.
     let genesis_from_db = db
         .load_cold_state_by_slot(Slot::new(0))
-        .map_err(|e| format!("Error reading genesis state: {e:?}"))?
-        .ok_or("Error: genesis state missing from database. Check schema version.")?;
+        .map_err(|e| format!("Error reading genesis state: {e:?}"))?;
 
     if genesis_from_db.genesis_validators_root() != genesis_state.genesis_validators_root() {
         return Err(format!(
@@ -438,18 +446,12 @@ pub fn prune_states<E: EthSpec>(
 
     // Check that the user has confirmed they want to proceed.
     if !prune_config.confirm {
-        match db.get_anchor_info() {
-            Some(anchor_info)
-                if anchor_info.state_lower_limit == 0
-                    && anchor_info.state_upper_limit == STATE_UPPER_LIMIT_NO_RETAIN =>
-            {
-                info!(log, "States have already been pruned");
-                return Ok(());
-            }
-            _ => {
-                info!(log, "Ready to prune states");
-            }
+        if db.get_anchor_info().full_state_pruning_enabled() {
+            info!(log, "States have already been pruned");
+            return Ok(());
         }
+
+        info!(log, "Ready to prune states");
         warn!(
             log,
             "Pruning states is irreversible";
@@ -484,10 +486,33 @@ pub fn run<E: EthSpec>(
     let log = context.log().clone();
     let format_err = |e| format!("Fatal error: {:?}", e);
 
+    let get_genesis_state = || {
+        let executor = env.core_context().executor;
+        let network_config = context
+            .eth2_network_config
+            .clone()
+            .ok_or("Missing network config")?;
+
+        executor
+            .block_on_dangerous(
+                network_config.genesis_state::<E>(
+                    client_config.genesis_state_url.as_deref(),
+                    client_config.genesis_state_url_timeout,
+                    &log,
+                ),
+                "get_genesis_state",
+            )
+            .ok_or("Shutting down")?
+            .map_err(|e| format!("Error getting genesis state: {e}"))?
+            .ok_or("Genesis state missing".to_string())
+    };
+
     match &db_manager_config.subcommand {
         cli::DatabaseManagerSubcommand::Migrate(migrate_config) => {
             let migrate_config = parse_migrate_config(migrate_config)?;
-            migrate_db(migrate_config, client_config, &context, log).map_err(format_err)
+            let genesis_state = get_genesis_state()?;
+            migrate_db(migrate_config, client_config, genesis_state, &context, log)
+                .map_err(format_err)
         }
         cli::DatabaseManagerSubcommand::Inspect(inspect_config) => {
             let inspect_config = parse_inspect_config(inspect_config)?;
@@ -503,27 +528,8 @@ pub fn run<E: EthSpec>(
             prune_blobs(client_config, &context, log).map_err(format_err)
         }
         cli::DatabaseManagerSubcommand::PruneStates(prune_states_config) => {
-            let executor = env.core_context().executor;
-            let network_config = context
-                .eth2_network_config
-                .clone()
-                .ok_or("Missing network config")?;
-
-            let genesis_state = executor
-                .block_on_dangerous(
-                    network_config.genesis_state::<E>(
-                        client_config.genesis_state_url.as_deref(),
-                        client_config.genesis_state_url_timeout,
-                        &log,
-                    ),
-                    "get_genesis_state",
-                )
-                .ok_or("Shutting down")?
-                .map_err(|e| format!("Error getting genesis state: {e}"))?
-                .ok_or("Genesis state missing")?;
-
             let prune_config = parse_prune_states_config(prune_states_config)?;
-
+            let genesis_state = get_genesis_state()?;
             prune_states(client_config, prune_config, genesis_state, &context, log)
         }
         cli::DatabaseManagerSubcommand::Compact(compact_config) => {

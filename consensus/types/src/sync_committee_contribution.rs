@@ -1,7 +1,6 @@
 use super::{AggregateSignature, EthSpec, SignedRoot};
 use crate::slot_data::SlotData;
 use crate::{test_utils::TestRandom, BitVector, Hash256, Slot, SyncCommitteeMessage};
-use safe_arith::ArithError;
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
 use test_random_derive::TestRandom;
@@ -11,7 +10,6 @@ use tree_hash_derive::TreeHash;
 pub enum Error {
     SszTypesError(ssz_types::Error),
     AlreadySigned(usize),
-    SubnetCountIsZero(ArithError),
 }
 
 /// An aggregation of `SyncCommitteeMessage`s, used in creating a `SignedContributionAndProof`.
@@ -43,8 +41,8 @@ impl<E: EthSpec> SyncCommitteeContribution<E> {
     ///
     /// - `message`: A single `SyncCommitteeMessage`.
     /// - `subcommittee_index`: The subcommittee this contribution pertains to out of the broader
-    ///     sync committee. This can be determined from the `SyncSubnetId` of the gossip subnet
-    ///     this message was seen on.
+    ///   sync committee. This can be determined from the `SyncSubnetId` of the gossip subnet
+    ///   this message was seen on.
     /// - `validator_sync_committee_index`: The index of the validator **within** the subcommittee.
     pub fn from_message(
         message: &SyncCommitteeMessage,

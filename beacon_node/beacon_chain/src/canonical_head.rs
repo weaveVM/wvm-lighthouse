@@ -236,12 +236,12 @@ impl<E: EthSpec> CachedHead<E> {
 pub struct CanonicalHead<T: BeaconChainTypes> {
     /// Provides an in-memory representation of the non-finalized block tree and is used to run the
     /// fork choice algorithm and determine the canonical head.
-    pub fork_choice: CanonicalHeadRwLock<BeaconForkChoice<T>>,
+    fork_choice: CanonicalHeadRwLock<BeaconForkChoice<T>>,
     /// Provides values cached from a previous execution of `self.fork_choice.get_head`.
     ///
     /// Although `self.fork_choice` might be slightly more advanced that this value, it is safe to
     /// consider that these values represent the "canonical head" of the beacon chain.
-    pub cached_head: CanonicalHeadRwLock<CachedHead<T::EthSpec>>,
+    cached_head: CanonicalHeadRwLock<CachedHead<T::EthSpec>>,
     /// A lock used to prevent concurrent runs of `BeaconChain::recompute_head`.
     ///
     /// This lock **should not be made public**, it should only be used inside this module.
@@ -383,11 +383,13 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
 
     /// Access a read-lock for fork choice.
     pub fn fork_choice_read_lock(&self) -> RwLockReadGuard<BeaconForkChoice<T>> {
+        let _timer = metrics::start_timer(&metrics::FORK_CHOICE_READ_LOCK_AQUIRE_TIMES);
         self.fork_choice.read()
     }
 
     /// Access a write-lock for fork choice.
     pub fn fork_choice_write_lock(&self) -> RwLockWriteGuard<BeaconForkChoice<T>> {
+        let _timer = metrics::start_timer(&metrics::FORK_CHOICE_WRITE_LOCK_AQUIRE_TIMES);
         self.fork_choice.write()
     }
 }
@@ -781,6 +783,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let new_head_is_optimistic = new_head_proto_block
             .execution_status
             .is_optimistic_or_invalid();
+
+        // Update the state cache so it doesn't mistakenly prune the new head.
+        self.store
+            .state_cache
+            .lock()
+            .update_head_block_root(new_cached_head.head_block_root());
 
         // Detect and potentially report any re-orgs.
         let reorg_distance = detect_reorg(
@@ -1252,11 +1260,7 @@ pub fn find_reorg_slot<E: EthSpec>(
         ($state: ident, $block_root: ident) => {
             std::iter::once(Ok(($state.slot(), $block_root)))
                 .chain($state.rev_iter_block_roots(spec))
-                .skip_while(|result| {
-                    result
-                        .as_ref()
-                        .map_or(false, |(slot, _)| *slot > lowest_slot)
-                })
+                .skip_while(|result| result.as_ref().is_ok_and(|(slot, _)| *slot > lowest_slot))
         };
     }
 

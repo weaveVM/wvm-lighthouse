@@ -1,6 +1,7 @@
 mod cli;
 mod metrics;
 
+use account_utils::STDIN_INPUTS_FLAG;
 use beacon_node::ProductionBeaconNode;
 use clap::FromArgMatches;
 use clap::Subcommand;
@@ -14,20 +15,20 @@ use environment::{EnvironmentBuilder, LoggerConfig};
 use eth2_network_config::{Eth2NetworkConfig, DEFAULT_HARDCODED_NETWORK, HARDCODED_NET_NAMES};
 use ethereum_hashing::have_sha_extensions;
 use futures::TryFutureExt;
-use lazy_static::lazy_static;
 use lighthouse_version::VERSION;
 use malloc_utils::configure_memory_allocator;
 use slog::{crit, info};
 use std::backtrace::Backtrace;
 use std::path::PathBuf;
 use std::process::exit;
+use std::sync::LazyLock;
 use task_executor::ShutdownReason;
 use types::{EthSpec, EthSpecId};
 use validator_client::ProductionValidatorClient;
 
-lazy_static! {
-    pub static ref SHORT_VERSION: String = VERSION.replace("Lighthouse/", "");
-    pub static ref LONG_VERSION: String = format!(
+pub static SHORT_VERSION: LazyLock<String> = LazyLock::new(|| VERSION.replace("Lighthouse/", ""));
+pub static LONG_VERSION: LazyLock<String> = LazyLock::new(|| {
+    format!(
         "{}\n\
          BLS library: {}\n\
          BLS hardware acceleration: {}\n\
@@ -44,8 +45,8 @@ lazy_static! {
         cfg!(feature = "spec-minimal"),
         cfg!(feature = "gnosis"),
         cfg!(feature = "wvm"),
-    );
-}
+    )
+});
 
 fn bls_library_name() -> &'static str {
     if cfg!(feature = "portable") {
@@ -66,11 +67,15 @@ fn bls_hardware_acceleration() -> bool {
     return std::arch::is_aarch64_feature_detected!("neon");
 }
 
-fn allocator_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "system"
-    } else {
-        "jemalloc"
+fn allocator_name() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        "system".to_string()
+    }
+    #[cfg(not(target_os = "windows"))]
+    match malloc_utils::jemalloc::page_size() {
+        Ok(page_size) => format!("jemalloc ({}K)", page_size / 1024),
+        Err(e) => format!("jemalloc (error: {e:?})"),
     }
 }
 
@@ -81,7 +86,7 @@ fn build_profile_name() -> String {
     std::env!("OUT_DIR")
         .split(std::path::MAIN_SEPARATOR)
         .nth_back(3)
-        .unwrap_or_else(|| "unknown")
+        .unwrap_or("unknown")
         .to_string()
 }
 
@@ -106,14 +111,14 @@ fn main() {
         .long_version(LONG_VERSION.as_str())
         .display_order(0)
         .arg(
-            Arg::new("env_log")
-                .short('l')
-                .help(
-                    "DEPRECATED Enables environment logging giving access to sub-protocol logs such as discv5 and libp2p",
-                )
+            Arg::new(STDIN_INPUTS_FLAG)
+                .long(STDIN_INPUTS_FLAG)
                 .action(ArgAction::SetTrue)
+                .help("If present, read all user inputs from stdin instead of tty.")
                 .help_heading(FLAG_HEADER)
-                .display_order(0)
+                .hide(cfg!(windows))
+                .global(true)
+                .display_order(0),
         )
         .arg(
             Arg::new("logfile")
@@ -323,57 +328,43 @@ fn main() {
             Arg::new("terminal-total-difficulty-override")
                 .long("terminal-total-difficulty-override")
                 .value_name("INTEGER")
-                .help("Used to coordinate manual overrides to the TERMINAL_TOTAL_DIFFICULTY parameter. \
-                       Accepts a 256-bit decimal integer (not a hex value). \
-                       This flag should only be used if the user has a clear understanding that \
-                       the broad Ethereum community has elected to override the terminal difficulty. \
-                       Incorrect use of this flag will cause your node to experience a consensus \
-                       failure. Be extremely careful with this flag.")
+                .help("DEPRECATED")
                 .action(ArgAction::Set)
                 .global(true)
                 .display_order(0)
+                .hide(true)
         )
         .arg(
             Arg::new("terminal-block-hash-override")
                 .long("terminal-block-hash-override")
                 .value_name("TERMINAL_BLOCK_HASH")
-                .help("Used to coordinate manual overrides to the TERMINAL_BLOCK_HASH parameter. \
-                       This flag should only be used if the user has a clear understanding that \
-                       the broad Ethereum community has elected to override the terminal PoW block. \
-                       Incorrect use of this flag will cause your node to experience a consensus \
-                       failure. Be extremely careful with this flag.")
+                .help("DEPRECATED")
                 .requires("terminal-block-hash-epoch-override")
                 .action(ArgAction::Set)
                 .global(true)
                 .display_order(0)
+                .hide(true)
         )
         .arg(
             Arg::new("terminal-block-hash-epoch-override")
                 .long("terminal-block-hash-epoch-override")
                 .value_name("EPOCH")
-                .help("Used to coordinate manual overrides to the TERMINAL_BLOCK_HASH_ACTIVATION_EPOCH \
-                       parameter. This flag should only be used if the user has a clear understanding \
-                       that the broad Ethereum community has elected to override the terminal PoW block. \
-                       Incorrect use of this flag will cause your node to experience a consensus \
-                       failure. Be extremely careful with this flag.")
+                .help("DEPRECATED")
                 .requires("terminal-block-hash-override")
                 .action(ArgAction::Set)
                 .global(true)
                 .display_order(0)
+                .hide(true)
         )
         .arg(
             Arg::new("safe-slots-to-import-optimistically")
                 .long("safe-slots-to-import-optimistically")
                 .value_name("INTEGER")
-                .help("Used to coordinate manual overrides of the SAFE_SLOTS_TO_IMPORT_OPTIMISTICALLY \
-                      parameter. This flag should only be used if the user has a clear understanding \
-                      that the broad Ethereum community has elected to override this parameter in the event \
-                      of an attack at the PoS transition block. Incorrect use of this flag can cause your \
-                      node to possibly accept an invalid chain or sync more slowly. Be extremely careful with \
-                      this flag.")
+                .help("DEPRECATED")
                 .action(ArgAction::Set)
                 .global(true)
                 .display_order(0)
+                .hide(true)
         )
         .arg(
             Arg::new("genesis-state-url")
@@ -409,10 +400,10 @@ fn main() {
             .action(ArgAction::HelpLong)
             .display_order(0)
             .help_heading(FLAG_HEADER)
+            .global(true)
         )
         .subcommand(beacon_node::cli_app())
         .subcommand(boot_node::cli_app())
-        .subcommand(validator_client::cli_app())
         .subcommand(account_manager::cli_app())
         .subcommand(validator_manager::cli_app());
 
@@ -618,20 +609,6 @@ fn run<E: EthSpec>(
         }));
     }
 
-    let mut tracing_log_path: Option<PathBuf> = clap_utils::parse_optional(matches, "logfile")?;
-
-    if tracing_log_path.is_none() {
-        tracing_log_path = Some(
-            parse_path_or_default(matches, "datadir")?
-                .join(DEFAULT_BEACON_NODE_DIR)
-                .join("logs"),
-        )
-    }
-
-    let path = tracing_log_path.clone().unwrap();
-
-    logging::create_tracing_layer(path);
-
     // Allow Prometheus to export the time at which the process was started.
     metrics::expose_process_start_time(&log);
 
@@ -645,6 +622,20 @@ fn run<E: EthSpec>(
             "CPU seems incompatible with optimized Lighthouse build";
             "advice" => "If you get a SIGILL, please try Lighthouse portable build"
         );
+    }
+
+    // Warn for DEPRECATED global flags. This code should be removed when we finish deleting these
+    // flags.
+    let deprecated_flags = [
+        "terminal-total-difficulty-override",
+        "terminal-block-hash-override",
+        "terminal-block-hash-epoch-override",
+        "safe-slots-to-import-optimistically",
+    ];
+    for flag in deprecated_flags {
+        if matches.get_one::<String>(flag).is_some() {
+            slog::warn!(log, "The {} flag is deprecated and does nothing", flag);
+        }
     }
 
     // Note: the current code technically allows for starting a beacon node _and_ a validator
@@ -685,57 +676,22 @@ fn run<E: EthSpec>(
         return Ok(());
     }
 
-    if let Ok(LighthouseSubcommands::DatabaseManager(db_manager_config)) =
-        LighthouseSubcommands::from_arg_matches(matches)
-    {
-        info!(log, "Running database manager for {} network", network_name);
-        database_manager::run(matches, &db_manager_config, environment)?;
-        return Ok(());
-    };
-
-    info!(log, "Lighthouse started"; "version" => VERSION);
-    info!(
-        log,
-        "Configured for network";
-        "name" => &network_name
-    );
-
-    match matches.subcommand() {
-        Some(("beacon_node", matches)) => {
-            let context = environment.core_context();
-            let log = context.log().clone();
-            let executor = context.executor.clone();
-            let mut config = beacon_node::get_config::<E>(matches, &context)?;
-            config.logger_config = logger_config;
-            // Dump configs if `dump-config` or `dump-chain-config` flags are set
-            clap_utils::check_dump_configs::<_, E>(matches, &config, &context.eth2_config.spec)?;
-
-            let shutdown_flag = matches.get_flag("immediate-shutdown");
-            if shutdown_flag {
-                info!(log, "Beacon node immediate shutdown triggered.");
-                return Ok(());
-            }
-
-            executor.clone().spawn(
-                async move {
-                    if let Err(e) = ProductionBeaconNode::new(context.clone(), config).await {
-                        crit!(log, "Failed to start beacon node"; "reason" => e);
-                        // Ignore the error since it always occurs during normal operation when
-                        // shutting down.
-                        let _ = executor
-                            .shutdown_sender()
-                            .try_send(ShutdownReason::Failure("Failed to start beacon node"));
-                    }
-                },
-                "beacon_node",
-            );
+    match LighthouseSubcommands::from_arg_matches(matches) {
+        Ok(LighthouseSubcommands::DatabaseManager(db_manager_config)) => {
+            info!(log, "Running database manager for {} network", network_name);
+            database_manager::run(matches, &db_manager_config, environment)?;
+            return Ok(());
         }
-        Some(("validator_client", matches)) => {
+        Ok(LighthouseSubcommands::ValidatorClient(validator_client_config)) => {
             let context = environment.core_context();
             let log = context.log().clone();
             let executor = context.executor.clone();
-            let config = validator_client::Config::from_cli(matches, context.log())
-                .map_err(|e| format!("Unable to initialize validator config: {}", e))?;
+            let config = validator_client::Config::from_cli(
+                matches,
+                &validator_client_config,
+                context.log(),
+            )
+            .map_err(|e| format!("Unable to initialize validator config: {}", e))?;
             // Dump configs if `dump-config` or `dump-chain-config` flags are set
             clap_utils::check_dump_configs::<_, E>(matches, &config, &context.eth2_config.spec)?;
 
@@ -762,6 +718,64 @@ fn run<E: EthSpec>(
                 "validator_client",
             );
         }
+        Err(_) => (),
+    };
+
+    info!(log, "Lighthouse started"; "version" => VERSION);
+    info!(
+        log,
+        "Configured for network";
+        "name" => &network_name
+    );
+
+    match matches.subcommand() {
+        Some(("beacon_node", matches)) => {
+            let context = environment.core_context();
+            let log = context.log().clone();
+            let executor = context.executor.clone();
+            let mut config = beacon_node::get_config::<E>(matches, &context)?;
+            config.logger_config = logger_config;
+            // Dump configs if `dump-config` or `dump-chain-config` flags are set
+            clap_utils::check_dump_configs::<_, E>(matches, &config, &context.eth2_config.spec)?;
+
+            let shutdown_flag = matches.get_flag("immediate-shutdown");
+            if shutdown_flag {
+                info!(log, "Beacon node immediate shutdown triggered.");
+                return Ok(());
+            }
+
+            let mut tracing_log_path: Option<PathBuf> =
+                clap_utils::parse_optional(matches, "logfile")?;
+
+            if tracing_log_path.is_none() {
+                tracing_log_path = Some(
+                    parse_path_or_default(matches, "datadir")?
+                        .join(DEFAULT_BEACON_NODE_DIR)
+                        .join("logs"),
+                )
+            }
+
+            let path = tracing_log_path.clone().unwrap();
+
+            logging::create_tracing_layer(path);
+
+            executor.clone().spawn(
+                async move {
+                    if let Err(e) = ProductionBeaconNode::new(context.clone(), config).await {
+                        crit!(log, "Failed to start beacon node"; "reason" => e);
+                        // Ignore the error since it always occurs during normal operation when
+                        // shutting down.
+                        let _ = executor
+                            .shutdown_sender()
+                            .try_send(ShutdownReason::Failure("Failed to start beacon node"));
+                    }
+                },
+                "beacon_node",
+            );
+        }
+        // TODO(clap-derive) delete this once we've fully migrated to clap derive.
+        // Qt the moment this needs to exist so that we dont trigger a crit.
+        Some(("validator_client", _)) => (),
         _ => {
             crit!(log, "No subcommand supplied. See --help .");
             return Err("No subcommand supplied.".into());

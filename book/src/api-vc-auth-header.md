@@ -9,22 +9,23 @@ HTTP header:
 - Value: `Bearer <api-token>`
 
 Where `<api-token>` is a string that can be obtained from the validator client
-host. Here is an example `Authorization` header:
+host. Here is an example of the `Authorization` header:
 
 ```text
-Authorization: Bearer api-token-0x03eace4c98e8f77477bb99efb74f9af10d800bd3318f92c33b719a4644254d4123
+Authorization: Bearer hGut6B8uEujufDXSmZsT0thnxvdvKFBvh
 ```
 
 ## Obtaining the API token
 
 The API token is stored as a file in the `validators` directory. For most users
-this is `~/.lighthouse/{network}/validators/api-token.txt`. Here's an
-example using the `cat` command to print the token to the terminal, but any
+this is `~/.lighthouse/{network}/validators/api-token.txt`, unless overridden using the
+`--http-token-path` CLI parameter. Here's an
+example using the `cat` command to print the token for mainnet to the terminal, but any
 text editor will suffice:
 
 ```bash
-cat api-token.txt
-api-token-0x03eace4c98e8f77477bb99efb74f9af10d800bd3318f92c33b719a4644254d4123
+cat ~/.lighthouse/mainnet/validators/api-token.txt
+hGut6B8uEujufDXSmZsT0thnxvdvKFBvh
 ```
 
 When starting the validator client it will output a log message containing the path
@@ -54,7 +55,7 @@ Response:
 Here is an example `curl` command using the API token in the `Authorization` header:
 
 ```bash
-curl localhost:5062/lighthouse/version -H "Authorization: Bearer api-token-0x03eace4c98e8f77477bb99efb74f9af10d800bd3318f92c33b719a4644254d4123"
+curl localhost:5062/lighthouse/version -H "Authorization: Bearer hGut6B8uEujufDXSmZsT0thnxvdvKFBvh"
 ```
 
 The server should respond with its version:

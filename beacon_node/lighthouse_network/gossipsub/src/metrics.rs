@@ -185,6 +185,21 @@ pub(crate) struct Metrics {
     /// The number of msg_id's we have received in every IDONTWANT control message.
     idontwant_msgs_ids: Counter,
 
+    /// The number of bytes we have received in every IDONTWANT control message.
+    idontwant_bytes: Counter,
+
+    /// Number of IDONTWANT messages sent per topic.
+    idontwant_messages_sent_per_topic: Family<TopicHash, Counter>,
+
+    /// Number of full messages we received that we previously sent a IDONTWANT for.
+    idontwant_messages_ignored_per_topic: Family<TopicHash, Counter>,
+
+    /// Count of duplicate messages we have received from mesh peers for a given topic.
+    mesh_duplicates: Family<TopicHash, Counter>,
+
+    /// Count of duplicate messages we have received from by requesting them over iwant for a given topic.
+    iwant_duplicates: Family<TopicHash, Counter>,
+
     /// The size of the priority queue.
     priority_queue_size: Histogram,
     /// The size of the non-priority queue.
@@ -338,6 +353,38 @@ impl Metrics {
             metric
         };
 
+        // IDONTWANT messages sent per topic
+        let idontwant_messages_sent_per_topic = register_family!(
+            "idonttwant_messages_sent_per_topic",
+            "Number of IDONTWANT messages sent per topic"
+        );
+
+        // IDONTWANTs which were ignored, and we still received the message per topic
+        let idontwant_messages_ignored_per_topic = register_family!(
+            "idontwant_messages_ignored_per_topic",
+            "IDONTWANT messages that were sent but we received the full message regardless"
+        );
+
+        let mesh_duplicates = register_family!(
+            "mesh_duplicates_per_topic",
+            "Count of duplicate messages received from mesh peers per topic"
+        );
+
+        let iwant_duplicates = register_family!(
+            "iwant_duplicates_per_topic",
+            "Count of duplicate messages received from non-mesh peers that we sent iwants for"
+        );
+
+        let idontwant_bytes = {
+            let metric = Counter::default();
+            registry.register(
+                "idontwant_bytes",
+                "The total bytes we have received an IDONTWANT control messages",
+                metric.clone(),
+            );
+            metric
+        };
+
         let memcache_misses = {
             let metric = Counter::default();
             registry.register(
@@ -390,7 +437,12 @@ impl Metrics {
             memcache_misses,
             topic_iwant_msgs,
             idontwant_msgs,
+            idontwant_bytes,
             idontwant_msgs_ids,
+            idontwant_messages_sent_per_topic,
+            idontwant_messages_ignored_per_topic,
+            mesh_duplicates,
+            iwant_duplicates,
             priority_queue_size,
             non_priority_queue_size,
         }
@@ -563,6 +615,20 @@ impl Metrics {
         }
     }
 
+    /// Register a duplicate message received from a mesh peer.
+    pub(crate) fn mesh_duplicates(&mut self, topic: &TopicHash) {
+        if self.register_topic(topic).is_ok() {
+            self.mesh_duplicates.get_or_create(topic).inc();
+        }
+    }
+
+    /// Register a duplicate message received from a non-mesh peer on an iwant request.
+    pub(crate) fn iwant_duplicates(&mut self, topic: &TopicHash) {
+        if self.register_topic(topic).is_ok() {
+            self.iwant_duplicates.get_or_create(topic).inc();
+        }
+    }
+
     pub(crate) fn register_msg_validation(
         &mut self,
         topic: &TopicHash,
@@ -587,6 +653,25 @@ impl Metrics {
         if self.register_topic(topic).is_ok() {
             self.topic_iwant_msgs.get_or_create(topic).inc();
         }
+    }
+
+    /// Register receiving the total bytes of an IDONTWANT control message.
+    pub(crate) fn register_idontwant_bytes(&mut self, bytes: usize) {
+        self.idontwant_bytes.inc_by(bytes as u64);
+    }
+
+    /// Register receiving an IDONTWANT control message for a given topic.
+    pub(crate) fn register_idontwant_messages_sent_per_topic(&mut self, topic: &TopicHash) {
+        self.idontwant_messages_sent_per_topic
+            .get_or_create(topic)
+            .inc();
+    }
+
+    /// Register receiving a message for an already sent IDONTWANT.
+    pub(crate) fn register_idontwant_messages_ignored_per_topic(&mut self, topic: &TopicHash) {
+        self.idontwant_messages_ignored_per_topic
+            .get_or_create(topic)
+            .inc();
     }
 
     /// Register receiving an IDONTWANT msg for this topic.
