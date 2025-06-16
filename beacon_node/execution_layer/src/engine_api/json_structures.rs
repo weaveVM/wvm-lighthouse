@@ -1,14 +1,15 @@
 use super::*;
 use alloy_rlp::RlpEncodable;
 use serde::{Deserialize, Serialize};
+use ssz::Decode;
 use strum::EnumString;
 use superstruct::superstruct;
 use types::beacon_block_body::KzgCommitments;
 use types::blob_sidecar::BlobsList;
-use types::{
-    DepositRequest, ExecutionLayerWithdrawalRequest, FixedVector, PublicKeyBytes, Signature,
-    Unsigned,
+use types::execution_requests::{
+    ConsolidationRequests, DepositRequests, RequestType, WithdrawalRequests,
 };
+use types::{Blob, FixedVector, KzgProof, Unsigned};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,7 +65,7 @@ pub struct JsonPayloadIdResponse {
 }
 
 #[superstruct(
-    variants(V1, V2, V3, V4),
+    variants(V1, V2, V3, V4, V5),
     variant_attributes(
         derive(Debug, PartialEq, Default, Serialize, Deserialize,),
         serde(bound = "E: EthSpec", rename_all = "camelCase"),
@@ -76,6 +77,7 @@ pub struct JsonPayloadIdResponse {
 #[serde(bound = "E: EthSpec", rename_all = "camelCase", untagged)]
 pub struct JsonExecutionPayload<E: EthSpec> {
     pub parent_hash: ExecutionBlockHash,
+    #[serde(with = "serde_utils::address_hex")]
     pub fee_recipient: Address,
     pub state_root: Hash256,
     pub receipts_root: Hash256,
@@ -94,23 +96,18 @@ pub struct JsonExecutionPayload<E: EthSpec> {
     pub extra_data: VariableList<u8, E::MaxExtraDataBytes>,
     #[serde(with = "serde_utils::u256_hex_be")]
     pub base_fee_per_gas: Uint256,
+
     pub block_hash: ExecutionBlockHash,
     #[serde(with = "ssz_types::serde_utils::list_of_hex_var_list")]
     pub transactions: Transactions<E>,
-    #[superstruct(only(V2, V3, V4))]
+    #[superstruct(only(V2, V3, V4, V5))]
     pub withdrawals: VariableList<JsonWithdrawal, E::MaxWithdrawalsPerPayload>,
-    #[superstruct(only(V3, V4))]
+    #[superstruct(only(V3, V4, V5))]
     #[serde(with = "serde_utils::u64_hex_be")]
     pub blob_gas_used: u64,
-    #[superstruct(only(V3, V4))]
+    #[superstruct(only(V3, V4, V5))]
     #[serde(with = "serde_utils::u64_hex_be")]
     pub excess_blob_gas: u64,
-    #[superstruct(only(V4))]
-    // TODO(electra): Field name should be changed post devnet-0. See https://github.com/ethereum/execution-apis/pull/544
-    pub deposit_requests: VariableList<JsonDepositRequest, E::MaxDepositRequestsPerPayload>,
-    #[superstruct(only(V4))]
-    pub withdrawal_requests:
-        VariableList<JsonWithdrawalRequest, E::MaxWithdrawalRequestsPerPayload>,
 }
 
 impl<E: EthSpec> From<ExecutionPayloadBellatrix<E>> for JsonExecutionPayloadV1<E> {
@@ -213,18 +210,35 @@ impl<E: EthSpec> From<ExecutionPayloadElectra<E>> for JsonExecutionPayloadV4<E> 
                 .into(),
             blob_gas_used: payload.blob_gas_used,
             excess_blob_gas: payload.excess_blob_gas,
-            deposit_requests: payload
-                .deposit_requests
+        }
+    }
+}
+
+impl<E: EthSpec> From<ExecutionPayloadFulu<E>> for JsonExecutionPayloadV5<E> {
+    fn from(payload: ExecutionPayloadFulu<E>) -> Self {
+        JsonExecutionPayloadV5 {
+            parent_hash: payload.parent_hash,
+            fee_recipient: payload.fee_recipient,
+            state_root: payload.state_root,
+            receipts_root: payload.receipts_root,
+            logs_bloom: payload.logs_bloom,
+            prev_randao: payload.prev_randao,
+            block_number: payload.block_number,
+            gas_limit: payload.gas_limit,
+            gas_used: payload.gas_used,
+            timestamp: payload.timestamp,
+            extra_data: payload.extra_data,
+            base_fee_per_gas: payload.base_fee_per_gas,
+            block_hash: payload.block_hash,
+            transactions: payload.transactions,
+            withdrawals: payload
+                .withdrawals
                 .into_iter()
                 .map(Into::into)
                 .collect::<Vec<_>>()
                 .into(),
-            withdrawal_requests: payload
-                .withdrawal_requests
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>()
-                .into(),
+            blob_gas_used: payload.blob_gas_used,
+            excess_blob_gas: payload.excess_blob_gas,
         }
     }
 }
@@ -236,6 +250,7 @@ impl<E: EthSpec> From<ExecutionPayload<E>> for JsonExecutionPayload<E> {
             ExecutionPayload::Capella(payload) => JsonExecutionPayload::V2(payload.into()),
             ExecutionPayload::Deneb(payload) => JsonExecutionPayload::V3(payload.into()),
             ExecutionPayload::Electra(payload) => JsonExecutionPayload::V4(payload.into()),
+            ExecutionPayload::Fulu(payload) => JsonExecutionPayload::V5(payload.into()),
         }
     }
 }
@@ -341,18 +356,35 @@ impl<E: EthSpec> From<JsonExecutionPayloadV4<E>> for ExecutionPayloadElectra<E> 
                 .into(),
             blob_gas_used: payload.blob_gas_used,
             excess_blob_gas: payload.excess_blob_gas,
-            deposit_requests: payload
-                .deposit_requests
+        }
+    }
+}
+
+impl<E: EthSpec> From<JsonExecutionPayloadV5<E>> for ExecutionPayloadFulu<E> {
+    fn from(payload: JsonExecutionPayloadV5<E>) -> Self {
+        ExecutionPayloadFulu {
+            parent_hash: payload.parent_hash,
+            fee_recipient: payload.fee_recipient,
+            state_root: payload.state_root,
+            receipts_root: payload.receipts_root,
+            logs_bloom: payload.logs_bloom,
+            prev_randao: payload.prev_randao,
+            block_number: payload.block_number,
+            gas_limit: payload.gas_limit,
+            gas_used: payload.gas_used,
+            timestamp: payload.timestamp,
+            extra_data: payload.extra_data,
+            base_fee_per_gas: payload.base_fee_per_gas,
+            block_hash: payload.block_hash,
+            transactions: payload.transactions,
+            withdrawals: payload
+                .withdrawals
                 .into_iter()
                 .map(Into::into)
                 .collect::<Vec<_>>()
                 .into(),
-            withdrawal_requests: payload
-                .withdrawal_requests
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>()
-                .into(),
+            blob_gas_used: payload.blob_gas_used,
+            excess_blob_gas: payload.excess_blob_gas,
         }
     }
 }
@@ -364,12 +396,93 @@ impl<E: EthSpec> From<JsonExecutionPayload<E>> for ExecutionPayload<E> {
             JsonExecutionPayload::V2(payload) => ExecutionPayload::Capella(payload.into()),
             JsonExecutionPayload::V3(payload) => ExecutionPayload::Deneb(payload.into()),
             JsonExecutionPayload::V4(payload) => ExecutionPayload::Electra(payload.into()),
+            JsonExecutionPayload::V5(payload) => ExecutionPayload::Fulu(payload.into()),
         }
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum RequestsError {
+    InvalidHex(hex::FromHexError),
+    EmptyRequest(usize),
+    InvalidOrdering,
+    InvalidPrefix(u8),
+    DecodeError(String),
+}
+
+/// Format of `ExecutionRequests` received over the engine api.
+///
+/// Array of ssz-encoded requests list encoded as hex bytes prefixed
+/// with a `RequestType`
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct JsonExecutionRequests(pub Vec<String>);
+
+impl<E: EthSpec> TryFrom<JsonExecutionRequests> for ExecutionRequests<E> {
+    type Error = RequestsError;
+
+    fn try_from(value: JsonExecutionRequests) -> Result<Self, Self::Error> {
+        let mut requests = ExecutionRequests::default();
+        let mut prev_prefix: Option<RequestType> = None;
+        for (i, request) in value.0.into_iter().enumerate() {
+            // hex string
+            let decoded_bytes = hex::decode(request.strip_prefix("0x").unwrap_or(&request))
+                .map_err(RequestsError::InvalidHex)?;
+
+            // The first byte of each element is the `request_type` and the remaining bytes are the `request_data`.
+            // Elements with empty `request_data` **MUST** be excluded from the list.
+            let Some((prefix_byte, request_bytes)) = decoded_bytes.split_first() else {
+                return Err(RequestsError::EmptyRequest(i));
+            };
+            if request_bytes.is_empty() {
+                return Err(RequestsError::EmptyRequest(i));
+            }
+            // Elements of the list **MUST** be ordered by `request_type` in ascending order
+            let current_prefix = RequestType::from_u8(*prefix_byte)
+                .ok_or(RequestsError::InvalidPrefix(*prefix_byte))?;
+            if let Some(prev) = prev_prefix {
+                if prev.to_u8() >= current_prefix.to_u8() {
+                    return Err(RequestsError::InvalidOrdering);
+                }
+            }
+            prev_prefix = Some(current_prefix);
+
+            match current_prefix {
+                RequestType::Deposit => {
+                    requests.deposits = DepositRequests::<E>::from_ssz_bytes(request_bytes)
+                        .map_err(|e| {
+                            RequestsError::DecodeError(format!(
+                                "Failed to decode DepositRequest from EL: {:?}",
+                                e
+                            ))
+                        })?;
+                }
+                RequestType::Withdrawal => {
+                    requests.withdrawals = WithdrawalRequests::<E>::from_ssz_bytes(request_bytes)
+                        .map_err(|e| {
+                        RequestsError::DecodeError(format!(
+                            "Failed to decode WithdrawalRequest from EL: {:?}",
+                            e
+                        ))
+                    })?;
+                }
+                RequestType::Consolidation => {
+                    requests.consolidations =
+                        ConsolidationRequests::<E>::from_ssz_bytes(request_bytes).map_err(|e| {
+                            RequestsError::DecodeError(format!(
+                                "Failed to decode ConsolidationRequest from EL: {:?}",
+                                e
+                            ))
+                        })?;
+                }
+            }
+        }
+        Ok(requests)
+    }
+}
+
 #[superstruct(
-    variants(V1, V2, V3, V4),
+    variants(V1, V2, V3, V4, V5),
     variant_attributes(
         derive(Debug, PartialEq, Serialize, Deserialize),
         serde(bound = "E: EthSpec", rename_all = "camelCase")
@@ -388,44 +501,63 @@ pub struct JsonGetPayloadResponse<E: EthSpec> {
     pub execution_payload: JsonExecutionPayloadV3<E>,
     #[superstruct(only(V4), partial_getter(rename = "execution_payload_v4"))]
     pub execution_payload: JsonExecutionPayloadV4<E>,
+    #[superstruct(only(V5), partial_getter(rename = "execution_payload_v5"))]
+    pub execution_payload: JsonExecutionPayloadV5<E>,
     #[serde(with = "serde_utils::u256_hex_be")]
     pub block_value: Uint256,
-    #[superstruct(only(V3, V4))]
+    #[superstruct(only(V3, V4, V5))]
     pub blobs_bundle: JsonBlobsBundleV1<E>,
-    #[superstruct(only(V3, V4))]
+    #[superstruct(only(V3, V4, V5))]
     pub should_override_builder: bool,
+    #[superstruct(only(V4, V5))]
+    pub execution_requests: JsonExecutionRequests,
 }
 
-impl<E: EthSpec> From<JsonGetPayloadResponse<E>> for GetPayloadResponse<E> {
-    fn from(json_get_payload_response: JsonGetPayloadResponse<E>) -> Self {
+impl<E: EthSpec> TryFrom<JsonGetPayloadResponse<E>> for GetPayloadResponse<E> {
+    type Error = String;
+    fn try_from(json_get_payload_response: JsonGetPayloadResponse<E>) -> Result<Self, Self::Error> {
         match json_get_payload_response {
             JsonGetPayloadResponse::V1(response) => {
-                GetPayloadResponse::Bellatrix(GetPayloadResponseBellatrix {
+                Ok(GetPayloadResponse::Bellatrix(GetPayloadResponseBellatrix {
                     execution_payload: response.execution_payload.into(),
                     block_value: response.block_value,
-                })
+                }))
             }
             JsonGetPayloadResponse::V2(response) => {
-                GetPayloadResponse::Capella(GetPayloadResponseCapella {
+                Ok(GetPayloadResponse::Capella(GetPayloadResponseCapella {
                     execution_payload: response.execution_payload.into(),
                     block_value: response.block_value,
-                })
+                }))
             }
             JsonGetPayloadResponse::V3(response) => {
-                GetPayloadResponse::Deneb(GetPayloadResponseDeneb {
+                Ok(GetPayloadResponse::Deneb(GetPayloadResponseDeneb {
                     execution_payload: response.execution_payload.into(),
                     block_value: response.block_value,
                     blobs_bundle: response.blobs_bundle.into(),
                     should_override_builder: response.should_override_builder,
-                })
+                }))
             }
             JsonGetPayloadResponse::V4(response) => {
-                GetPayloadResponse::Electra(GetPayloadResponseElectra {
+                Ok(GetPayloadResponse::Electra(GetPayloadResponseElectra {
                     execution_payload: response.execution_payload.into(),
                     block_value: response.block_value,
                     blobs_bundle: response.blobs_bundle.into(),
                     should_override_builder: response.should_override_builder,
-                })
+                    requests: response.execution_requests.try_into().map_err(|e| {
+                        format!("Failed to convert json to execution requests : {:?}", e)
+                    })?,
+                }))
+            }
+            JsonGetPayloadResponse::V5(response) => {
+                Ok(GetPayloadResponse::Fulu(GetPayloadResponseFulu {
+                    execution_payload: response.execution_payload.into(),
+                    block_value: response.block_value,
+                    blobs_bundle: response.blobs_bundle.into(),
+                    should_override_builder: response.should_override_builder,
+                    requests: response.execution_requests.try_into().map_err(|e| {
+                        format!("Failed to convert json to execution requests  {:?}", e)
+                    })?,
+                }))
             }
         }
     }
@@ -438,6 +570,7 @@ pub struct JsonWithdrawal {
     pub index: u64,
     #[serde(with = "serde_utils::u64_hex_be")]
     pub validator_index: u64,
+    #[serde(with = "serde_utils::address_hex")]
     pub address: Address,
     #[serde(with = "serde_utils::u64_hex_be")]
     pub amount: u64,
@@ -477,7 +610,7 @@ impl<'a> From<&'a JsonWithdrawal> for EncodableJsonWithdrawal<'a> {
         Self {
             index: json_withdrawal.index,
             validator_index: json_withdrawal.validator_index,
-            address: json_withdrawal.address.as_bytes(),
+            address: json_withdrawal.address.as_slice(),
             amount: json_withdrawal.amount,
         }
     }
@@ -498,6 +631,7 @@ pub struct JsonPayloadAttributes {
     #[serde(with = "serde_utils::u64_hex_be")]
     pub timestamp: u64,
     pub prev_randao: Hash256,
+    #[serde(with = "serde_utils::address_hex")]
     pub suggested_fee_recipient: Address,
     #[superstruct(only(V2, V3))]
     pub withdrawals: Vec<JsonWithdrawal>,
@@ -583,11 +717,21 @@ impl<E: EthSpec> From<JsonBlobsBundleV1<E>> for BlobsBundle<E> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound = "E: EthSpec", rename_all = "camelCase")]
+pub struct BlobAndProofV1<E: EthSpec> {
+    #[serde(with = "ssz_types::serde_utils::hex_fixed_vec")]
+    pub blob: Blob<E>,
+    pub proof: KzgProof,
+}
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JsonForkchoiceStateV1 {
     pub head_block_hash: ExecutionBlockHash,
+
     pub safe_block_hash: ExecutionBlockHash,
+
     pub finalized_block_hash: ExecutionBlockHash,
 }
 
@@ -739,14 +883,10 @@ impl From<ForkchoiceUpdatedResponse> for JsonForkchoiceUpdatedV1Response {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "E: EthSpec")]
-#[serde(rename_all = "camelCase")]
 pub struct JsonExecutionPayloadBodyV1<E: EthSpec> {
     #[serde(with = "ssz_types::serde_utils::list_of_hex_var_list")]
     pub transactions: Transactions<E>,
     pub withdrawals: Option<VariableList<JsonWithdrawal, E::MaxWithdrawalsPerPayload>>,
-    pub deposit_requests: Option<VariableList<JsonDepositRequest, E::MaxDepositRequestsPerPayload>>,
-    pub withdrawal_requests:
-        Option<VariableList<JsonWithdrawalRequest, E::MaxWithdrawalRequestsPerPayload>>,
 }
 
 impl<E: EthSpec> From<JsonExecutionPayloadBodyV1<E>> for ExecutionPayloadBodyV1<E> {
@@ -761,21 +901,16 @@ impl<E: EthSpec> From<JsonExecutionPayloadBodyV1<E>> for ExecutionPayloadBodyV1<
                         .collect::<Vec<_>>(),
                 )
             }),
-            deposit_requests: value.deposit_requests.map(|json_receipts| {
-                DepositRequests::<E>::from(
-                    json_receipts
-                        .into_iter()
-                        .map(Into::into)
-                        .collect::<Vec<_>>(),
-                )
-            }),
-            withdrawal_requests: value.withdrawal_requests.map(|json_withdrawal_requests| {
-                WithdrawalRequests::<E>::from(
-                    json_withdrawal_requests
-                        .into_iter()
-                        .map(Into::into)
-                        .collect::<Vec<_>>(),
-                )
+        }
+    }
+}
+
+impl<E: EthSpec> From<ExecutionPayloadBodyV1<E>> for JsonExecutionPayloadBodyV1<E> {
+    fn from(value: ExecutionPayloadBodyV1<E>) -> Self {
+        Self {
+            transactions: value.transactions,
+            withdrawals: value.withdrawals.map(|withdrawals| {
+                VariableList::from(withdrawals.into_iter().map(Into::into).collect::<Vec<_>>())
             }),
         }
     }
@@ -786,6 +921,7 @@ impl<E: EthSpec> From<JsonExecutionPayloadBodyV1<E>> for ExecutionPayloadBodyV1<
 pub struct TransitionConfigurationV1 {
     #[serde(with = "serde_utils::u256_hex_be")]
     pub terminal_total_difficulty: Uint256,
+
     pub terminal_block_hash: ExecutionBlockHash,
     #[serde(with = "serde_utils::u64_hex_be")]
     pub terminal_block_number: u64,
@@ -856,67 +992,153 @@ impl TryFrom<JsonClientVersionV1> for ClientVersionV1 {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct JsonDepositRequest {
-    pub pubkey: PublicKeyBytes,
-    pub withdrawal_credentials: Hash256,
-    #[serde(with = "serde_utils::u64_hex_be")]
-    pub amount: u64,
-    pub signature: Signature,
-    #[serde(with = "serde_utils::u64_hex_be")]
-    pub index: u64,
-}
+#[cfg(test)]
+mod tests {
+    use ssz::Encode;
+    use types::{
+        ConsolidationRequest, DepositRequest, MainnetEthSpec, PublicKeyBytes, RequestType,
+        SignatureBytes, WithdrawalRequest,
+    };
 
-impl From<DepositRequest> for JsonDepositRequest {
-    fn from(deposit: DepositRequest) -> Self {
-        Self {
-            pubkey: deposit.pubkey,
-            withdrawal_credentials: deposit.withdrawal_credentials,
-            amount: deposit.amount,
-            signature: deposit.signature,
-            index: deposit.index,
-        }
+    use super::*;
+
+    fn create_request_string<T: Encode>(prefix: u8, request_bytes: &T) -> String {
+        format!(
+            "0x{:02x}{}",
+            prefix,
+            hex::encode(request_bytes.as_ssz_bytes())
+        )
     }
-}
 
-impl From<JsonDepositRequest> for DepositRequest {
-    fn from(json_deposit: JsonDepositRequest) -> Self {
-        Self {
-            pubkey: json_deposit.pubkey,
-            withdrawal_credentials: json_deposit.withdrawal_credentials,
-            amount: json_deposit.amount,
-            signature: json_deposit.signature,
-            index: json_deposit.index,
-        }
-    }
-}
+    /// Tests all error conditions except ssz decoding errors
+    ///
+    /// ***
+    /// Elements of the list MUST be ordered by request_type in ascending order.
+    /// Elements with empty request_data MUST be excluded from the list.
+    /// If any element is out of order, has a length of 1-byte or shorter,
+    /// or more than one element has the same type byte, client software MUST return -32602: Invalid params error.
+    /// ***
+    #[test]
+    fn test_invalid_execution_requests() {
+        let deposit_request = DepositRequest {
+            pubkey: PublicKeyBytes::empty(),
+            withdrawal_credentials: Hash256::random(),
+            amount: 32,
+            signature: SignatureBytes::empty(),
+            index: 0,
+        };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct JsonWithdrawalRequest {
-    pub source_address: Address,
-    pub validator_public_key: PublicKeyBytes,
-    #[serde(with = "serde_utils::u64_hex_be")]
-    pub amount: u64,
-}
+        let consolidation_request = ConsolidationRequest {
+            source_address: Address::random(),
+            source_pubkey: PublicKeyBytes::empty(),
+            target_pubkey: PublicKeyBytes::empty(),
+        };
 
-impl From<ExecutionLayerWithdrawalRequest> for JsonWithdrawalRequest {
-    fn from(withdrawal_request: ExecutionLayerWithdrawalRequest) -> Self {
-        Self {
-            source_address: withdrawal_request.source_address,
-            validator_public_key: withdrawal_request.validator_pubkey,
-            amount: withdrawal_request.amount,
-        }
-    }
-}
+        let withdrawal_request = WithdrawalRequest {
+            amount: 32,
+            source_address: Address::random(),
+            validator_pubkey: PublicKeyBytes::empty(),
+        };
 
-impl From<JsonWithdrawalRequest> for ExecutionLayerWithdrawalRequest {
-    fn from(json_withdrawal_request: JsonWithdrawalRequest) -> Self {
-        Self {
-            source_address: json_withdrawal_request.source_address,
-            validator_pubkey: json_withdrawal_request.validator_public_key,
-            amount: json_withdrawal_request.amount,
-        }
+        // First check a valid request with all requests
+        assert!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(RequestType::Deposit.to_u8(), &deposit_request),
+                create_request_string(RequestType::Withdrawal.to_u8(), &withdrawal_request),
+                create_request_string(RequestType::Consolidation.to_u8(), &consolidation_request),
+            ]))
+            .is_ok()
+        );
+
+        // Single requests
+        assert!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(RequestType::Deposit.to_u8(), &deposit_request),
+            ]))
+            .is_ok()
+        );
+
+        assert!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(RequestType::Withdrawal.to_u8(), &withdrawal_request),
+            ]))
+            .is_ok()
+        );
+
+        assert!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(RequestType::Consolidation.to_u8(), &consolidation_request),
+            ]))
+            .is_ok()
+        );
+
+        // Out of order
+        assert!(matches!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(RequestType::Withdrawal.to_u8(), &withdrawal_request),
+                create_request_string(RequestType::Deposit.to_u8(), &deposit_request),
+            ]))
+            .unwrap_err(),
+            RequestsError::InvalidOrdering
+        ));
+
+        assert!(matches!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(RequestType::Consolidation.to_u8(), &consolidation_request),
+                create_request_string(RequestType::Withdrawal.to_u8(), &withdrawal_request),
+            ]))
+            .unwrap_err(),
+            RequestsError::InvalidOrdering
+        ));
+
+        assert!(matches!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(RequestType::Consolidation.to_u8(), &consolidation_request),
+                create_request_string(RequestType::Deposit.to_u8(), &deposit_request),
+            ]))
+            .unwrap_err(),
+            RequestsError::InvalidOrdering
+        ));
+
+        // Multiple requests of same type
+        assert!(matches!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(RequestType::Deposit.to_u8(), &deposit_request),
+                create_request_string(RequestType::Deposit.to_u8(), &deposit_request),
+            ]))
+            .unwrap_err(),
+            RequestsError::InvalidOrdering
+        ));
+
+        // Invalid prefix
+        assert!(matches!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(42, &deposit_request),
+            ]))
+            .unwrap_err(),
+            RequestsError::InvalidPrefix(42)
+        ));
+
+        // Prefix followed by no data
+        assert!(matches!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(RequestType::Deposit.to_u8(), &deposit_request),
+                create_request_string(
+                    RequestType::Consolidation.to_u8(),
+                    &Vec::<ConsolidationRequest>::new()
+                ),
+            ]))
+            .unwrap_err(),
+            RequestsError::EmptyRequest(1)
+        ));
+        // Empty request
+        assert!(matches!(
+            ExecutionRequests::<MainnetEthSpec>::try_from(JsonExecutionRequests(vec![
+                create_request_string(RequestType::Deposit.to_u8(), &deposit_request),
+                "0x".to_string()
+            ]))
+            .unwrap_err(),
+            RequestsError::EmptyRequest(1)
+        ));
     }
 }

@@ -19,8 +19,8 @@ use types::{
     beacon_state::{
         compute_committee_index_in_epoch, compute_committee_range_in_epoch, epoch_committee_count,
     },
-    BeaconState, BeaconStateError, ChainSpec, Checkpoint, Epoch, EthSpec, Hash256, RelativeEpoch,
-    Slot,
+    BeaconState, BeaconStateError, ChainSpec, Checkpoint, Epoch, EthSpec, FixedBytesExtended,
+    Hash256, RelativeEpoch, Slot,
 };
 
 type JustifiedCheckpoint = Checkpoint;
@@ -325,8 +325,10 @@ impl AttesterCache {
             return Ok(value);
         }
 
+        // We use `cache_state = true` here because if we are attesting to the state it's likely
+        // to be recent and useful for other things.
         let mut state: BeaconState<T::EthSpec> = chain
-            .get_state(&state_root, None)?
+            .get_state(&state_root, None, true)?
             .ok_or(Error::MissingBeaconState(state_root))?;
 
         if state.slot() > slot {

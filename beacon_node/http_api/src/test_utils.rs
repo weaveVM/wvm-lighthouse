@@ -8,6 +8,7 @@ use beacon_processor::{
 };
 use directory::DEFAULT_ROOT_DIR;
 use eth2::{BeaconNodeHttpClient, Timeouts};
+use lighthouse_network::rpc::methods::MetaDataV3;
 use lighthouse_network::{
     discv5::enr::CombinedKey,
     libp2p::swarm::{
@@ -16,7 +17,7 @@ use lighthouse_network::{
     },
     rpc::methods::{MetaData, MetaDataV2},
     types::{EnrAttestationBitfield, EnrSyncCommitteeBitfield, SyncState},
-    ConnectedPoint, Enr, NetworkGlobals, PeerId, PeerManager,
+    ConnectedPoint, Enr, NetworkConfig, NetworkGlobals, PeerId, PeerManager,
 };
 use logging::test_logger;
 use network::{NetworkReceivers, NetworkSenders};
@@ -61,7 +62,8 @@ type Mutator<E> = BoxedMutator<E, MemoryStore<E>, MemoryStore<E>>;
 
 impl<E: EthSpec> InteractiveTester<E> {
     pub async fn new(spec: Option<ChainSpec>, validator_count: usize) -> Self {
-        Self::new_with_initializer_and_mutator(spec, validator_count, None, None).await
+        Self::new_with_initializer_and_mutator(spec, validator_count, None, None, Config::default())
+            .await
     }
 
     pub async fn new_with_initializer_and_mutator(
@@ -69,9 +71,10 @@ impl<E: EthSpec> InteractiveTester<E> {
         validator_count: usize,
         initializer: Option<Initializer<E>>,
         mutator: Option<Mutator<E>>,
+        config: Config,
     ) -> Self {
         let mut harness_builder = BeaconChainHarness::builder(E::default())
-            .spec_or_default(spec)
+            .spec_or_default(spec.map(Arc::new))
             .logger(test_logger())
             .mock_execution_layer();
 
@@ -99,8 +102,9 @@ impl<E: EthSpec> InteractiveTester<E> {
             listening_socket,
             network_rx,
             ..
-        } = create_api_server(
+        } = create_api_server_with_config(
             harness.chain.clone(),
+            config,
             &harness.runtime,
             harness.logger().clone(),
         )
@@ -132,25 +136,47 @@ pub async fn create_api_server<T: BeaconChainTypes>(
     test_runtime: &TestRuntime,
     log: Logger,
 ) -> ApiServer<T, impl Future<Output = ()>> {
+    create_api_server_with_config(chain, Config::default(), test_runtime, log).await
+}
+
+pub async fn create_api_server_with_config<T: BeaconChainTypes>(
+    chain: Arc<BeaconChain<T>>,
+    http_config: Config,
+    test_runtime: &TestRuntime,
+    log: Logger,
+) -> ApiServer<T, impl Future<Output = ()>> {
     // Use port 0 to allocate a new unused port.
     let port = 0;
 
     let (network_senders, network_receivers) = NetworkSenders::new();
 
     // Default metadata
-    let meta_data = MetaData::V2(MetaDataV2 {
-        seq_number: SEQ_NUMBER,
-        attnets: EnrAttestationBitfield::<T::EthSpec>::default(),
-        syncnets: EnrSyncCommitteeBitfield::<T::EthSpec>::default(),
-    });
+    let meta_data = if chain.spec.is_peer_das_scheduled() {
+        MetaData::V3(MetaDataV3 {
+            seq_number: SEQ_NUMBER,
+            attnets: EnrAttestationBitfield::<T::EthSpec>::default(),
+            syncnets: EnrSyncCommitteeBitfield::<T::EthSpec>::default(),
+            custody_group_count: chain.spec.custody_requirement,
+        })
+    } else {
+        MetaData::V2(MetaDataV2 {
+            seq_number: SEQ_NUMBER,
+            attnets: EnrAttestationBitfield::<T::EthSpec>::default(),
+            syncnets: EnrSyncCommitteeBitfield::<T::EthSpec>::default(),
+        })
+    };
+
     let enr_key = CombinedKey::generate_secp256k1();
     let enr = Enr::builder().build(&enr_key).unwrap();
+    let network_config = Arc::new(NetworkConfig::default());
     let network_globals = Arc::new(NetworkGlobals::new(
         enr.clone(),
         meta_data,
         vec![],
         false,
         &log,
+        network_config,
+        chain.spec.clone(),
     ));
 
     // Only a peer manager can add peers, so we create a dummy manager.
@@ -217,12 +243,14 @@ pub async fn create_api_server<T: BeaconChainTypes>(
     .unwrap();
 
     let ctx = Arc::new(Context {
+        // Override several config fields with defaults. If these need to be tweaked in future
+        // we could remove these overrides.
         config: Config {
             enabled: true,
             listen_port: port,
             data_dir: std::path::PathBuf::from(DEFAULT_ROOT_DIR),
             enable_light_client_server: true,
-            ..Config::default()
+            ..http_config
         },
         chain: Some(chain),
         network_senders: Some(network_senders),

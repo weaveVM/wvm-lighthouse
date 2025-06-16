@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::sync::Weak;
 use tokio::runtime::Runtime;
 use types::{
-    ChainSpec, EnrForkId, Epoch, EthSpec, ForkContext, ForkName, Hash256, MinimalEthSpec, Slot,
+    ChainSpec, EnrForkId, Epoch, EthSpec, FixedBytesExtended, ForkContext, ForkName, Hash256,
+    MinimalEthSpec, Slot,
 };
 
 type E = MinimalEthSpec;
@@ -24,12 +25,14 @@ pub fn fork_context(fork_name: ForkName) -> ForkContext {
     let capella_fork_epoch = Epoch::new(3);
     let deneb_fork_epoch = Epoch::new(4);
     let electra_fork_epoch = Epoch::new(5);
+    let fulu_fork_epoch = Epoch::new(6);
 
     chain_spec.altair_fork_epoch = Some(altair_fork_epoch);
     chain_spec.bellatrix_fork_epoch = Some(bellatrix_fork_epoch);
     chain_spec.capella_fork_epoch = Some(capella_fork_epoch);
     chain_spec.deneb_fork_epoch = Some(deneb_fork_epoch);
     chain_spec.electra_fork_epoch = Some(electra_fork_epoch);
+    chain_spec.fulu_fork_epoch = Some(fulu_fork_epoch);
 
     let current_slot = match fork_name {
         ForkName::Base => Slot::new(0),
@@ -38,6 +41,7 @@ pub fn fork_context(fork_name: ForkName) -> ForkContext {
         ForkName::Capella => capella_fork_epoch.start_slot(E::slots_per_epoch()),
         ForkName::Deneb => deneb_fork_epoch.start_slot(E::slots_per_epoch()),
         ForkName::Electra => electra_fork_epoch.start_slot(E::slots_per_epoch()),
+        ForkName::Fulu => fulu_fork_epoch.start_slot(E::slots_per_epoch()),
     };
     ForkContext::new::<E>(current_slot, Hash256::zero(), &chain_spec)
 }
@@ -75,7 +79,7 @@ pub fn build_log(level: slog::Level, enabled: bool) -> slog::Logger {
     }
 }
 
-pub fn build_config(mut boot_nodes: Vec<Enr>) -> NetworkConfig {
+pub fn build_config(mut boot_nodes: Vec<Enr>) -> Arc<NetworkConfig> {
     let mut config = NetworkConfig::default();
 
     // Find unused ports by using the 0 port.
@@ -91,7 +95,7 @@ pub fn build_config(mut boot_nodes: Vec<Enr>) -> NetworkConfig {
     config.enr_address = (Some(std::net::Ipv4Addr::LOCALHOST), None);
     config.boot_nodes_enr.append(&mut boot_nodes);
     config.network_dir = path.into_path();
-    config
+    Arc::new(config)
 }
 
 pub async fn build_libp2p_instance(
@@ -99,7 +103,7 @@ pub async fn build_libp2p_instance(
     boot_nodes: Vec<Enr>,
     log: slog::Logger,
     fork_name: ForkName,
-    spec: &ChainSpec,
+    chain_spec: Arc<ChainSpec>,
 ) -> Libp2pInstance {
     let config = build_config(boot_nodes);
     // launch libp2p service
@@ -108,10 +112,10 @@ pub async fn build_libp2p_instance(
     let (shutdown_tx, _) = futures::channel::mpsc::channel(1);
     let executor = task_executor::TaskExecutor::new(rt, exit, log.clone(), shutdown_tx);
     let libp2p_context = lighthouse_network::Context {
-        config: &config,
+        config,
         enr_fork_id: EnrForkId::default(),
         fork_context: Arc::new(fork_context(fork_name)),
-        chain_spec: spec,
+        chain_spec,
         libp2p_registry: None,
     };
     Libp2pInstance(
@@ -141,14 +145,16 @@ pub async fn build_node_pair(
     rt: Weak<Runtime>,
     log: &slog::Logger,
     fork_name: ForkName,
-    spec: &ChainSpec,
+    spec: Arc<ChainSpec>,
     protocol: Protocol,
 ) -> (Libp2pInstance, Libp2pInstance) {
     let sender_log = log.new(o!("who" => "sender"));
     let receiver_log = log.new(o!("who" => "receiver"));
 
-    let mut sender = build_libp2p_instance(rt.clone(), vec![], sender_log, fork_name, spec).await;
-    let mut receiver = build_libp2p_instance(rt, vec![], receiver_log, fork_name, spec).await;
+    let mut sender =
+        build_libp2p_instance(rt.clone(), vec![], sender_log, fork_name, spec.clone()).await;
+    let mut receiver =
+        build_libp2p_instance(rt, vec![], receiver_log, fork_name, spec.clone()).await;
 
     // let the two nodes set up listeners
     let sender_fut = async {
@@ -217,11 +223,13 @@ pub async fn build_linear(
     log: slog::Logger,
     n: usize,
     fork_name: ForkName,
-    spec: &ChainSpec,
+    spec: Arc<ChainSpec>,
 ) -> Vec<Libp2pInstance> {
     let mut nodes = Vec::with_capacity(n);
     for _ in 0..n {
-        nodes.push(build_libp2p_instance(rt.clone(), vec![], log.clone(), fork_name, spec).await);
+        nodes.push(
+            build_libp2p_instance(rt.clone(), vec![], log.clone(), fork_name, spec.clone()).await,
+        );
     }
 
     let multiaddrs: Vec<Multiaddr> = nodes

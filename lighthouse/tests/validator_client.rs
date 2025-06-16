@@ -1,7 +1,8 @@
-use validator_client::{config::DEFAULT_WEB3SIGNER_KEEP_ALIVE, ApiTopic, Config};
+use beacon_node_fallback::{beacon_node_health::BeaconNodeSyncDistanceTiers, ApiTopic};
 
 use crate::exec::CommandLineTestExec;
 use bls::{Keypair, PublicKeyBytes};
+use initialized_validators::DEFAULT_WEB3SIGNER_KEEP_ALIVE;
 use sensitive_url::SensitiveUrl;
 use std::fs::File;
 use std::io::Write;
@@ -12,7 +13,8 @@ use std::str::FromStr;
 use std::string::ToString;
 use std::time::Duration;
 use tempfile::TempDir;
-use types::Address;
+use types::{Address, Slot};
+use validator_client::Config;
 
 /// Returns the `lighthouse validator_client` command.
 fn base_cmd() -> Command {
@@ -128,13 +130,29 @@ fn use_long_timeouts_flag() {
 }
 
 #[test]
+fn long_timeouts_multiplier_flag_default() {
+    CommandLineTest::new()
+        .run()
+        .with_config(|config| assert_eq!(config.long_timeouts_multiplier, 1));
+}
+
+#[test]
+fn long_timeouts_multiplier_flag() {
+    CommandLineTest::new()
+        .flag("use-long-timeouts", None)
+        .flag("long-timeouts-multiplier", Some("10"))
+        .run()
+        .with_config(|config| assert_eq!(config.long_timeouts_multiplier, 10));
+}
+
+#[test]
 fn beacon_nodes_tls_certs_flag() {
     let dir = TempDir::new().expect("Unable to create temporary directory");
     CommandLineTest::new()
         .flag(
             "beacon-nodes-tls-certs",
             Some(
-                vec![
+                [
                     dir.path().join("certificate.crt").to_str().unwrap(),
                     dir.path().join("certificate2.crt").to_str().unwrap(),
                 ]
@@ -203,7 +221,7 @@ fn graffiti_file_with_pk_flag() {
     let mut file = File::create(dir.path().join("graffiti.txt")).expect("Unable to create file");
     let new_key = Keypair::random();
     let pubkeybytes = PublicKeyBytes::from(new_key.pk);
-    let contents = format!("{}:nice-graffiti", pubkeybytes.to_string());
+    let contents = format!("{}:nice-graffiti", pubkeybytes);
     file.write_all(contents.as_bytes())
         .expect("Unable to write to file");
     CommandLineTest::new()
@@ -238,7 +256,7 @@ fn fee_recipient_flag() {
         .run()
         .with_config(|config| {
             assert_eq!(
-                config.fee_recipient,
+                config.validator_store.fee_recipient,
                 Some(Address::from_str("0x00000000219ab540356cbb839cbe05303d7705fa").unwrap())
             )
         });
@@ -342,6 +360,34 @@ fn http_store_keystore_passwords_in_secrets_dir_present() {
         .with_config(|config| assert!(config.http_api.store_passwords_in_secrets_dir));
 }
 
+#[test]
+fn http_token_path_flag_present() {
+    let dir = TempDir::new().expect("Unable to create temporary directory");
+    CommandLineTest::new()
+        .flag("http", None)
+        .flag("http-token-path", dir.path().join("api-token.txt").to_str())
+        .run()
+        .with_config(|config| {
+            assert_eq!(
+                config.http_api.http_token_path,
+                dir.path().join("api-token.txt")
+            );
+        });
+}
+
+#[test]
+fn http_token_path_default() {
+    CommandLineTest::new()
+        .flag("http", None)
+        .run()
+        .with_config(|config| {
+            assert_eq!(
+                config.http_api.http_token_path,
+                config.validator_dir.join("api-token.txt")
+            );
+        });
+}
+
 // Tests for Metrics flags.
 #[test]
 fn metrics_flag() {
@@ -377,6 +423,13 @@ fn metrics_port_flag() {
         .with_config(|config| assert_eq!(config.http_metrics.listen_port, 9090));
 }
 #[test]
+fn metrics_port_flag_default() {
+    CommandLineTest::new()
+        .flag("metrics", None)
+        .run()
+        .with_config(|config| assert_eq!(config.http_metrics.listen_port, 5064));
+}
+#[test]
 fn metrics_allow_origin_flag() {
     CommandLineTest::new()
         .flag("metrics", None)
@@ -402,13 +455,13 @@ pub fn malloc_tuning_flag() {
     CommandLineTest::new()
         .flag("disable-malloc-tuning", None)
         .run()
-        .with_config(|config| assert_eq!(config.http_metrics.allocator_metrics_enabled, false));
+        .with_config(|config| assert!(!config.http_metrics.allocator_metrics_enabled));
 }
 #[test]
 pub fn malloc_tuning_default() {
     CommandLineTest::new()
         .run()
-        .with_config(|config| assert_eq!(config.http_metrics.allocator_metrics_enabled, true));
+        .with_config(|config| assert!(config.http_metrics.allocator_metrics_enabled));
 }
 #[test]
 fn doppelganger_protection_flag() {
@@ -425,17 +478,10 @@ fn no_doppelganger_protection_flag() {
 }
 
 #[test]
-fn produce_block_v3_flag() {
-    // The flag is DEPRECATED but providing it should not trigger an error.
-    // We can delete this test when deleting the flag entirely.
-    CommandLineTest::new().flag("produce-block-v3", None).run();
-}
-
-#[test]
 fn no_gas_limit_flag() {
     CommandLineTest::new()
         .run()
-        .with_config(|config| assert!(config.gas_limit.is_none()));
+        .with_config(|config| assert!(config.validator_store.gas_limit == Some(30_000_000)));
 }
 #[test]
 fn gas_limit_flag() {
@@ -443,46 +489,46 @@ fn gas_limit_flag() {
         .flag("gas-limit", Some("600"))
         .flag("builder-proposals", None)
         .run()
-        .with_config(|config| assert_eq!(config.gas_limit, Some(600)));
+        .with_config(|config| assert_eq!(config.validator_store.gas_limit, Some(600)));
 }
 #[test]
 fn no_builder_proposals_flag() {
     CommandLineTest::new()
         .run()
-        .with_config(|config| assert!(!config.builder_proposals));
+        .with_config(|config| assert!(!config.validator_store.builder_proposals));
 }
 #[test]
 fn builder_proposals_flag() {
     CommandLineTest::new()
         .flag("builder-proposals", None)
         .run()
-        .with_config(|config| assert!(config.builder_proposals));
+        .with_config(|config| assert!(config.validator_store.builder_proposals));
 }
 #[test]
 fn builder_boost_factor_flag() {
     CommandLineTest::new()
         .flag("builder-boost-factor", Some("150"))
         .run()
-        .with_config(|config| assert_eq!(config.builder_boost_factor, Some(150)));
+        .with_config(|config| assert_eq!(config.validator_store.builder_boost_factor, Some(150)));
 }
 #[test]
 fn no_builder_boost_factor_flag() {
     CommandLineTest::new()
         .run()
-        .with_config(|config| assert_eq!(config.builder_boost_factor, None));
+        .with_config(|config| assert_eq!(config.validator_store.builder_boost_factor, None));
 }
 #[test]
 fn prefer_builder_proposals_flag() {
     CommandLineTest::new()
         .flag("prefer-builder-proposals", None)
         .run()
-        .with_config(|config| assert!(config.prefer_builder_proposals));
+        .with_config(|config| assert!(config.validator_store.prefer_builder_proposals));
 }
 #[test]
 fn no_prefer_builder_proposals_flag() {
     CommandLineTest::new()
         .run()
-        .with_config(|config| assert!(!config.prefer_builder_proposals));
+        .with_config(|config| assert!(!config.validator_store.prefer_builder_proposals));
 }
 #[test]
 fn no_builder_registration_timestamp_override_flag() {
@@ -513,24 +559,6 @@ fn monitoring_endpoint() {
 }
 
 #[test]
-fn disable_run_on_all_flag() {
-    CommandLineTest::new()
-        .flag("disable-run-on-all", None)
-        .run()
-        .with_config(|config| {
-            assert_eq!(config.broadcast_topics, vec![]);
-        });
-    // --broadcast flag takes precedence
-    CommandLineTest::new()
-        .flag("disable-run-on-all", None)
-        .flag("broadcast", Some("attestations"))
-        .run()
-        .with_config(|config| {
-            assert_eq!(config.broadcast_topics, vec![ApiTopic::Attestations]);
-        });
-}
-
-#[test]
 fn no_broadcast_flag() {
     CommandLineTest::new().run().with_config(|config| {
         assert_eq!(config.broadcast_topics, vec![ApiTopic::Subscriptions]);
@@ -555,7 +583,7 @@ fn broadcast_flag() {
         });
     // Other valid variants
     CommandLineTest::new()
-        .flag("broadcast", Some("blocks, subscriptions"))
+        .flag("broadcast", Some("blocks,subscriptions"))
         .run()
         .with_config(|config| {
             assert_eq!(
@@ -572,8 +600,35 @@ fn broadcast_flag() {
         });
 }
 
+/// Tests for validator fallback flags.
 #[test]
-#[should_panic(expected = "Unknown API topic")]
+fn beacon_nodes_sync_tolerances_flag_default() {
+    CommandLineTest::new().run().with_config(|config| {
+        assert_eq!(
+            config.beacon_node_fallback.sync_tolerances,
+            BeaconNodeSyncDistanceTiers::default()
+        )
+    });
+}
+#[test]
+fn beacon_nodes_sync_tolerances_flag() {
+    CommandLineTest::new()
+        .flag("beacon-nodes-sync-tolerances", Some("4,4,4"))
+        .run()
+        .with_config(|config| {
+            assert_eq!(
+                config.beacon_node_fallback.sync_tolerances,
+                BeaconNodeSyncDistanceTiers {
+                    synced: Slot::new(4),
+                    small: Slot::new(8),
+                    medium: Slot::new(12),
+                }
+            );
+        });
+}
+
+#[test]
+#[should_panic(expected = "invalid value")]
 fn wrong_broadcast_flag() {
     CommandLineTest::new()
         .flag("broadcast", Some("foo, subscriptions"))
@@ -593,16 +648,6 @@ fn disable_latency_measurement_service() {
         .run()
         .with_config(|config| {
             assert!(!config.enable_latency_measurement_service);
-        });
-}
-#[test]
-fn latency_measurement_service() {
-    // This flag is DEPRECATED so has no effect, but should still be accepted.
-    CommandLineTest::new()
-        .flag("latency-measurement-service", Some("false"))
-        .run()
-        .with_config(|config| {
-            assert!(config.enable_latency_measurement_service);
         });
 }
 
@@ -630,7 +675,7 @@ fn validator_registration_batch_size_zero_value() {
 #[test]
 fn validator_disable_web3_signer_slashing_protection_default() {
     CommandLineTest::new().run().with_config(|config| {
-        assert!(config.enable_web3signer_slashing_protection);
+        assert!(config.validator_store.enable_web3signer_slashing_protection);
     });
 }
 
@@ -640,7 +685,7 @@ fn validator_disable_web3_signer_slashing_protection() {
         .flag("disable-slashing-protection-web3signer", None)
         .run()
         .with_config(|config| {
-            assert!(!config.enable_web3signer_slashing_protection);
+            assert!(!config.validator_store.enable_web3signer_slashing_protection);
         });
 }
 
@@ -648,7 +693,7 @@ fn validator_disable_web3_signer_slashing_protection() {
 fn validator_web3_signer_keep_alive_default() {
     CommandLineTest::new().run().with_config(|config| {
         assert_eq!(
-            config.web3_signer_keep_alive_timeout,
+            config.initialized_validators.web3_signer_keep_alive_timeout,
             DEFAULT_WEB3SIGNER_KEEP_ALIVE
         );
     });
@@ -661,7 +706,7 @@ fn validator_web3_signer_keep_alive_override() {
         .run()
         .with_config(|config| {
             assert_eq!(
-                config.web3_signer_keep_alive_timeout,
+                config.initialized_validators.web3_signer_keep_alive_timeout,
                 Some(Duration::from_secs(1))
             );
         });

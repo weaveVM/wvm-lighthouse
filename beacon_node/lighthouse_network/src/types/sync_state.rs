@@ -35,8 +35,6 @@ pub enum BackFillState {
     Syncing,
     /// A backfill sync has completed.
     Completed,
-    /// A backfill sync is not required.
-    NotRequired,
     /// Too many failed attempts at backfilling. Consider it failed.
     Failed,
 }
@@ -91,6 +89,14 @@ impl SyncState {
     pub fn is_synced(&self) -> bool {
         matches!(self, SyncState::Synced | SyncState::BackFillSyncing { .. })
     }
+
+    /// Returns true if the node is *stalled*, i.e. has no synced peers.
+    ///
+    /// Usually this state is treated as unsynced, except in some places where we make an exception
+    /// for single-node testnets where having 0 peers is desired.
+    pub fn is_stalled(&self) -> bool {
+        matches!(self, SyncState::Stalled)
+    }
 }
 
 impl std::fmt::Display for SyncState {
@@ -98,8 +104,8 @@ impl std::fmt::Display for SyncState {
         match self {
             SyncState::SyncingFinalized { .. } => write!(f, "Syncing Finalized Chain"),
             SyncState::SyncingHead { .. } => write!(f, "Syncing Head Chain"),
-            SyncState::Synced { .. } => write!(f, "Synced"),
-            SyncState::Stalled { .. } => write!(f, "Stalled"),
+            SyncState::Synced => write!(f, "Synced"),
+            SyncState::Stalled => write!(f, "Stalled"),
             SyncState::SyncTransition => write!(f, "Evaluating known peers"),
             SyncState::BackFillSyncing { .. } => write!(f, "Syncing Historical Blocks"),
         }

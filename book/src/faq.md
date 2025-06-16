@@ -14,7 +14,6 @@
 - [My beacon node logs `WARN Error signalling fork choice waiter`, what should I do?](#bn-fork-choice)
 - [My beacon node logs `ERRO Aggregate attestation queue full`, what should I do?](#bn-queue-full)
 - [My beacon node logs `WARN Failed to finalize deposit cache`, what should I do?](#bn-deposit-cache)
-- [My beacon node logs `WARN Could not verify blob sidecar for gossip`, what does it mean?](#bn-blob)
 
 ## [Validator](#validator-1)
 
@@ -93,7 +92,7 @@ If the reason for the error message is caused by no. 1 above, you may want to lo
 
 - Power outage. If power outages are an issue at your place, consider getting a UPS to avoid ungraceful shutdown of services.
 - The service file is not stopped properly. To overcome this, make sure that the process is stopped properly, e.g., during client updates.
-- Out of memory (oom) error. This can happen when the system memory usage has reached its maximum and causes the execution engine to be killed. To confirm that the error is due to oom, run `sudo dmesg -T | grep killed` to look for killed processes. If you are using geth as the execution client, a short term solution is to reduce the resources used. For example, you can reduce the cache by adding the flag `--cache 2048`. If the oom occurs rather frequently, a long term solution is to increase the memory capacity of the computer.
+- Out of memory (oom) error. This can happen when the system memory usage has reached its maximum and causes the execution engine to be killed. To confirm that the error is due to oom, run `sudo dmesg -T | grep killed` to look for killed processes. If you are using Geth as the execution client, a short term solution is to reduce the resources used. For example, you can reduce the cache by adding the flag `--cache 2048`. If the oom occurs rather frequently, a long term solution is to increase the memory capacity of the computer.
 
 ### <a name="bn-upcheck"></a> I see beacon logs showing `Error during execution engine upcheck`, what should I do?
 
@@ -203,16 +202,6 @@ This suggests that the computer resources are being overwhelmed. It could be due
 
 This is a known [bug](https://github.com/sigp/lighthouse/issues/3707) that will fix by itself.
 
-### <a name="bn-blob"></a> My beacon node logs `WARN Could not verify blob sidecar for gossip`, what does it mean?
-
-An example of the full log is shown below:
-
-```text
-Jun 07 23:05:12.170 WARN Could not verify blob sidecar for gossip. Ignoring the blob sidecar, commitment: 0xaa97…6f54, index: 1, root: 0x93b8…c47c, slot: 9248017, error: PastFinalizedSlot { blob_slot: Slot(9248017), finalized_slot: Slot(9248032) }, module: network::network_beacon_processor::gossip_methods:720
-```
-
-The `PastFinalizedSlot` indicates that the time at which the node received the blob has past the finalization period. This could be due to a peer sending an earlier blob. The log will be gone when Lighthouse eventually drops the peer.
-
 ## Validator
 
 ### <a name="vc-activation"></a> Why does it take so long for a validator to be activated?
@@ -281,28 +270,7 @@ limit](https://github.com/ethereum/consensus-specs/blob/v1.3.0/specs/phase0/beac
 it will only allow the number of validators to increase (churn) by a certain
 amount. If a new validator isn't within the churn limit from the front of the queue,
 they will need to wait another epoch (6.4 minutes) for their next chance. This
-repeats until the queue is cleared. The churn limit is summarised in the table below:
-
-<div align="center" style="text-align: center;">
-
-| Number of active validators | Validators activated per epoch | Validators activated per day |
-|----------------|----|------|
-| 327679 or less | 4  | 900  |
-| 327680-393215  | 5  | 1125 |
-| 393216-458751  | 6  | 1350 |
-| 458752-524287  | 7  | 1575 |
-| 524288-589823  | 8  | 1800 |
-| 589824-655359  | 9  | 2025 |
-| 655360-720895  | 10 | 2250 |
-| 720896-786431  | 11 | 2475 |
-| 786432-851967  | 12 | 2700 |
-| 851968-917503  | 13 | 2925 |
-| 917504-983039  | 14 | 3150 |
-| 983040-1048575 | 15 | 3375 |
-
-</div>
-
-For example, the number of active validators on Mainnet is about 574000 on May 2023. This means that 8 validators can be activated per epoch or 1800 per day (it is noted that the same applies to the exit queue). If, for example, there are 9000 validators waiting to be activated, this means that the waiting time can take up to 5 days.
+repeats until the queue is cleared. The churn limit for validators joining the beacon chain is capped at 8 per epoch or 1800 per day. If, for example, there are 9000 validators waiting to be activated, this means that the waiting time can take up to 5 days.
 
 Once a validator has been activated, congratulations! It's time to
 produce blocks and attestations!
@@ -334,7 +302,7 @@ An example of the log: (debug logs can be found under `$datadir/beacon/logs`):
 Delayed head block, set_as_head_time_ms: 27, imported_time_ms: 168, attestable_delay_ms: 4209, available_delay_ms: 4186, execution_time_ms: 201, blob_delay_ms: 3815, observed_delay_ms: 3984, total_delay_ms: 4381, slot: 1886014, proposer_index: 733, block_root: 0xa7390baac88d50f1cbb5ad81691915f6402385a12521a670bbbd4cd5f8bf3934, service: beacon, module: beacon_chain::canonical_head:1441
 ```
 
-The field to look for is `attestable_delay`, which defines the time when a block is ready for the validator to attest. If the `attestable_delay` is greater than 4s which has past the window of attestation, the attestation wil fail. In the above example, the delay is mostly caused by late block observed by the node, as shown in  `observed_delay`. The `observed_delay` is determined mostly by the proposer and partly by your networking setup (e.g., how long it took for the node to receive the block). Ideally,  `observed_delay` should be less than 3 seconds. In this example, the validator failed to attest the block due to the block arriving late.
+The field to look for is `attestable_delay`, which defines the time when a block is ready for the validator to attest. If the `attestable_delay` is greater than 4s which has past the window of attestation, the attestation will fail. In the above example, the delay is mostly caused by late block observed by the node, as shown in  `observed_delay`. The `observed_delay` is determined mostly by the proposer and partly by your networking setup (e.g., how long it took for the node to receive the block). Ideally,  `observed_delay` should be less than 3 seconds. In this example, the validator failed to attest the block due to the block arriving late.
 
 Another example of log:
 
@@ -347,7 +315,7 @@ In this example, we see that the `execution_time_ms` is 4694ms. The `execution_t
 
 ### <a name="vc-head-vote"></a> Sometimes I miss the attestation head vote, resulting in penalty. Is this normal?
 
-In general, it is unavoidable to have some penalties occasionally. This is particularly the case when you are assigned to attest on the first slot of an epoch and if the proposer of that slot releases the block late, then you will get penalised for missing the target and head votes. Your attestation performance does not only depend on your own setup, but also on everyone elses performance.
+In general, it is unavoidable to have some penalties occasionally. This is particularly the case when you are assigned to attest on the first slot of an epoch and if the proposer of that slot releases the block late, then you will get penalised for missing the target and head votes. Your attestation performance does not only depend on your own setup, but also on everyone else's performance.
 
 You could also check for the sync aggregate participation percentage on block explorers such as [beaconcha.in](https://beaconcha.in/). A low sync aggregate participation percentage (e.g., 60-70%) indicates that the block that you are assigned to attest to may be published late. As a result, your validator fails to correctly attest to the block.
 

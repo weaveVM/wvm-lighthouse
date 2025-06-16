@@ -3,13 +3,13 @@
 use super::*;
 use crate::auth::Auth;
 use crate::json_structures::*;
-use lazy_static::lazy_static;
 use lighthouse_version::{COMMIT_PREFIX, VERSION};
 use reqwest::header::CONTENT_TYPE;
 use sensitive_url::SensitiveUrl;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::collections::HashSet;
+use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
 use std::time::{Duration, Instant};
@@ -35,12 +35,14 @@ pub const ENGINE_NEW_PAYLOAD_V1: &str = "engine_newPayloadV1";
 pub const ENGINE_NEW_PAYLOAD_V2: &str = "engine_newPayloadV2";
 pub const ENGINE_NEW_PAYLOAD_V3: &str = "engine_newPayloadV3";
 pub const ENGINE_NEW_PAYLOAD_V4: &str = "engine_newPayloadV4";
+pub const ENGINE_NEW_PAYLOAD_V5: &str = "engine_newPayloadV5";
 pub const ENGINE_NEW_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub const ENGINE_GET_PAYLOAD_V1: &str = "engine_getPayloadV1";
 pub const ENGINE_GET_PAYLOAD_V2: &str = "engine_getPayloadV2";
 pub const ENGINE_GET_PAYLOAD_V3: &str = "engine_getPayloadV3";
 pub const ENGINE_GET_PAYLOAD_V4: &str = "engine_getPayloadV4";
+pub const ENGINE_GET_PAYLOAD_V5: &str = "engine_getPayloadV5";
 pub const ENGINE_GET_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub const ENGINE_FORKCHOICE_UPDATED_V1: &str = "engine_forkchoiceUpdatedV1";
@@ -58,6 +60,9 @@ pub const ENGINE_EXCHANGE_CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(1
 pub const ENGINE_GET_CLIENT_VERSION_V1: &str = "engine_getClientVersionV1";
 pub const ENGINE_GET_CLIENT_VERSION_TIMEOUT: Duration = Duration::from_secs(1);
 
+pub const ENGINE_GET_BLOBS_V1: &str = "engine_getBlobsV1";
+pub const ENGINE_GET_BLOBS_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// This error is returned during a `chainId` call by Geth.
 pub const EIP155_ERROR_STR: &str = "chain not synced beyond EIP-155 replay-protection fork block";
 /// This code is returned by all clients when a method is not supported
@@ -69,30 +74,32 @@ pub static LIGHTHOUSE_CAPABILITIES: &[&str] = &[
     ENGINE_NEW_PAYLOAD_V2,
     ENGINE_NEW_PAYLOAD_V3,
     ENGINE_NEW_PAYLOAD_V4,
+    ENGINE_NEW_PAYLOAD_V5,
     ENGINE_GET_PAYLOAD_V1,
     ENGINE_GET_PAYLOAD_V2,
     ENGINE_GET_PAYLOAD_V3,
     ENGINE_GET_PAYLOAD_V4,
+    ENGINE_GET_PAYLOAD_V5,
     ENGINE_FORKCHOICE_UPDATED_V1,
     ENGINE_FORKCHOICE_UPDATED_V2,
     ENGINE_FORKCHOICE_UPDATED_V3,
     ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1,
     ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1,
     ENGINE_GET_CLIENT_VERSION_V1,
+    ENGINE_GET_BLOBS_V1,
 ];
 
-lazy_static! {
-    /// We opt to initialize the JsonClientVersionV1 rather than the ClientVersionV1
-    /// for two reasons:
-    /// 1. This saves the overhead of converting into Json for every engine call
-    /// 2. The Json version lacks error checking so we can avoid calling `unwrap()`
-    pub static ref LIGHTHOUSE_JSON_CLIENT_VERSION: JsonClientVersionV1 = JsonClientVersionV1 {
+/// We opt to initialize the JsonClientVersionV1 rather than the ClientVersionV1
+/// for two reasons:
+/// 1. This saves the overhead of converting into Json for every engine call
+/// 2. The Json version lacks error checking so we can avoid calling `unwrap()`
+pub static LIGHTHOUSE_JSON_CLIENT_VERSION: LazyLock<JsonClientVersionV1> =
+    LazyLock::new(|| JsonClientVersionV1 {
         code: ClientCode::Lighthouse.to_string(),
         name: "Lighthouse".to_string(),
         version: VERSION.replace("Lighthouse/", ""),
         commit: COMMIT_PREFIX.to_string(),
-    };
-}
+    });
 
 /// Contains methods to convert arbitrary bytes to an ETH2 deposit contract object.
 pub mod deposit_log {
@@ -155,9 +162,7 @@ pub mod deposit_log {
             };
 
             let signature_is_valid = deposit_pubkey_signature_message(&deposit_data, spec)
-                .map_or(false, |(public_key, signature, msg)| {
-                    signature.verify(&public_key, msg)
-                });
+                .is_some_and(|(public_key, signature, msg)| signature.verify(&public_key, msg));
 
             Ok(DepositLog {
                 deposit_data,
@@ -589,7 +594,7 @@ impl<T: Clone> CachedResponse<T> {
 
     /// returns `true` if the entry's age is >= age_limit
     pub fn older_than(&self, age_limit: Option<Duration>) -> bool {
-        age_limit.map_or(false, |limit| self.age() >= limit)
+        age_limit.is_some_and(|limit| self.age() >= limit)
     }
 }
 
@@ -703,9 +708,23 @@ impl HttpJsonRpc {
         }
     }
 
-    pub async fn get_block_by_number<'a>(
+    pub async fn get_blobs<E: EthSpec>(
         &self,
-        query: BlockByNumberQuery<'a>,
+        versioned_hashes: Vec<Hash256>,
+    ) -> Result<Vec<Option<BlobAndProofV1<E>>>, Error> {
+        let params = json!([versioned_hashes]);
+
+        self.rpc_request(
+            ENGINE_GET_BLOBS_V1,
+            params,
+            ENGINE_GET_BLOBS_TIMEOUT * self.execution_timeout_multiplier,
+        )
+        .await
+    }
+
+    pub async fn get_block_by_number(
+        &self,
+        query: BlockByNumberQuery<'_>,
     ) -> Result<Option<ExecutionBlock>, Error> {
         let params = json!([query, RETURN_FULL_TRANSACTION_OBJECTS]);
 
@@ -729,54 +748,6 @@ impl HttpJsonRpc {
             ETH_GET_BLOCK_BY_HASH_TIMEOUT * self.execution_timeout_multiplier,
         )
         .await
-    }
-
-    pub async fn get_block_by_hash_with_txns<E: EthSpec>(
-        &self,
-        block_hash: ExecutionBlockHash,
-        fork: ForkName,
-    ) -> Result<Option<ExecutionBlockWithTransactions<E>>, Error> {
-        let params = json!([block_hash, true]);
-        Ok(Some(match fork {
-            ForkName::Bellatrix => ExecutionBlockWithTransactions::Bellatrix(
-                self.rpc_request(
-                    ETH_GET_BLOCK_BY_HASH,
-                    params,
-                    ETH_GET_BLOCK_BY_HASH_TIMEOUT * self.execution_timeout_multiplier,
-                )
-                .await?,
-            ),
-            ForkName::Capella => ExecutionBlockWithTransactions::Capella(
-                self.rpc_request(
-                    ETH_GET_BLOCK_BY_HASH,
-                    params,
-                    ETH_GET_BLOCK_BY_HASH_TIMEOUT * self.execution_timeout_multiplier,
-                )
-                .await?,
-            ),
-            ForkName::Deneb => ExecutionBlockWithTransactions::Deneb(
-                self.rpc_request(
-                    ETH_GET_BLOCK_BY_HASH,
-                    params,
-                    ETH_GET_BLOCK_BY_HASH_TIMEOUT * self.execution_timeout_multiplier,
-                )
-                .await?,
-            ),
-            ForkName::Electra => ExecutionBlockWithTransactions::Electra(
-                self.rpc_request(
-                    ETH_GET_BLOCK_BY_HASH,
-                    params,
-                    ETH_GET_BLOCK_BY_HASH_TIMEOUT * self.execution_timeout_multiplier,
-                )
-                .await?,
-            ),
-            ForkName::Base | ForkName::Altair => {
-                return Err(Error::UnsupportedForkVariant(format!(
-                    "called get_block_by_hash_with_txns with fork {:?}",
-                    fork
-                )))
-            }
-        }))
     }
 
     pub async fn new_payload_v1<E: EthSpec>(
@@ -842,6 +813,34 @@ impl HttpJsonRpc {
             JsonExecutionPayload::V4(new_payload_request_electra.execution_payload.clone().into()),
             new_payload_request_electra.versioned_hashes,
             new_payload_request_electra.parent_beacon_block_root,
+            new_payload_request_electra
+                .execution_requests
+                .get_execution_requests_list(),
+        ]);
+
+        let response: JsonPayloadStatusV1 = self
+            .rpc_request(
+                ENGINE_NEW_PAYLOAD_V4,
+                params,
+                ENGINE_NEW_PAYLOAD_TIMEOUT * self.execution_timeout_multiplier,
+            )
+            .await?;
+
+        Ok(response.into())
+    }
+
+    // TODO(fulu): switch to v5 endpoint when the EL is ready for Fulu
+    pub async fn new_payload_v4_fulu<E: EthSpec>(
+        &self,
+        new_payload_request_fulu: NewPayloadRequestFulu<'_, E>,
+    ) -> Result<PayloadStatusV1, Error> {
+        let params = json!([
+            JsonExecutionPayload::V5(new_payload_request_fulu.execution_payload.clone().into()),
+            new_payload_request_fulu.versioned_hashes,
+            new_payload_request_fulu.parent_beacon_block_root,
+            new_payload_request_fulu
+                .execution_requests
+                .get_execution_requests_list(),
         ]);
 
         let response: JsonPayloadStatusV1 = self
@@ -874,7 +873,7 @@ impl HttpJsonRpc {
             // Set the V1 payload values from the EE to be zero. This simulates
             // the pre-block-value functionality of always choosing the builder
             // block.
-            block_value: Uint256::zero(),
+            block_value: Uint256::ZERO,
         }))
     }
 
@@ -894,7 +893,9 @@ impl HttpJsonRpc {
                         ENGINE_GET_PAYLOAD_TIMEOUT * self.execution_timeout_multiplier,
                     )
                     .await?;
-                Ok(JsonGetPayloadResponse::V1(response).into())
+                JsonGetPayloadResponse::V1(response)
+                    .try_into()
+                    .map_err(Error::BadResponse)
             }
             ForkName::Capella => {
                 let response: JsonGetPayloadResponseV2<E> = self
@@ -904,11 +905,14 @@ impl HttpJsonRpc {
                         ENGINE_GET_PAYLOAD_TIMEOUT * self.execution_timeout_multiplier,
                     )
                     .await?;
-                Ok(JsonGetPayloadResponse::V2(response).into())
+                JsonGetPayloadResponse::V2(response)
+                    .try_into()
+                    .map_err(Error::BadResponse)
             }
-            ForkName::Base | ForkName::Altair | ForkName::Deneb | ForkName::Electra => Err(
-                Error::UnsupportedForkVariant(format!("called get_payload_v2 with {}", fork_name)),
-            ),
+            _ => Err(Error::UnsupportedForkVariant(format!(
+                "called get_payload_v2 with {}",
+                fork_name
+            ))),
         }
     }
 
@@ -928,13 +932,11 @@ impl HttpJsonRpc {
                         ENGINE_GET_PAYLOAD_TIMEOUT * self.execution_timeout_multiplier,
                     )
                     .await?;
-                Ok(JsonGetPayloadResponse::V3(response).into())
+                JsonGetPayloadResponse::V3(response)
+                    .try_into()
+                    .map_err(Error::BadResponse)
             }
-            ForkName::Base
-            | ForkName::Altair
-            | ForkName::Bellatrix
-            | ForkName::Capella
-            | ForkName::Electra => Err(Error::UnsupportedForkVariant(format!(
+            _ => Err(Error::UnsupportedForkVariant(format!(
                 "called get_payload_v3 with {}",
                 fork_name
             ))),
@@ -957,14 +959,52 @@ impl HttpJsonRpc {
                         ENGINE_GET_PAYLOAD_TIMEOUT * self.execution_timeout_multiplier,
                     )
                     .await?;
-                Ok(JsonGetPayloadResponse::V4(response).into())
+                JsonGetPayloadResponse::V4(response)
+                    .try_into()
+                    .map_err(Error::BadResponse)
             }
-            ForkName::Base
-            | ForkName::Altair
-            | ForkName::Bellatrix
-            | ForkName::Capella
-            | ForkName::Deneb => Err(Error::UnsupportedForkVariant(format!(
+            // TODO(fulu): remove when v5 method is ready.
+            ForkName::Fulu => {
+                let response: JsonGetPayloadResponseV5<E> = self
+                    .rpc_request(
+                        ENGINE_GET_PAYLOAD_V4,
+                        params,
+                        ENGINE_GET_PAYLOAD_TIMEOUT * self.execution_timeout_multiplier,
+                    )
+                    .await?;
+                JsonGetPayloadResponse::V5(response)
+                    .try_into()
+                    .map_err(Error::BadResponse)
+            }
+            _ => Err(Error::UnsupportedForkVariant(format!(
                 "called get_payload_v4 with {}",
+                fork_name
+            ))),
+        }
+    }
+
+    pub async fn get_payload_v5<E: EthSpec>(
+        &self,
+        fork_name: ForkName,
+        payload_id: PayloadId,
+    ) -> Result<GetPayloadResponse<E>, Error> {
+        let params = json!([JsonPayloadIdRequest::from(payload_id)]);
+
+        match fork_name {
+            ForkName::Fulu => {
+                let response: JsonGetPayloadResponseV5<E> = self
+                    .rpc_request(
+                        ENGINE_GET_PAYLOAD_V5,
+                        params,
+                        ENGINE_GET_PAYLOAD_TIMEOUT * self.execution_timeout_multiplier,
+                    )
+                    .await?;
+                JsonGetPayloadResponse::V5(response)
+                    .try_into()
+                    .map_err(Error::BadResponse)
+            }
+            _ => Err(Error::UnsupportedForkVariant(format!(
+                "called get_payload_v5 with {}",
                 fork_name
             ))),
         }
@@ -1093,6 +1133,7 @@ impl HttpJsonRpc {
             new_payload_v2: capabilities.contains(ENGINE_NEW_PAYLOAD_V2),
             new_payload_v3: capabilities.contains(ENGINE_NEW_PAYLOAD_V3),
             new_payload_v4: capabilities.contains(ENGINE_NEW_PAYLOAD_V4),
+            new_payload_v5: capabilities.contains(ENGINE_NEW_PAYLOAD_V5),
             forkchoice_updated_v1: capabilities.contains(ENGINE_FORKCHOICE_UPDATED_V1),
             forkchoice_updated_v2: capabilities.contains(ENGINE_FORKCHOICE_UPDATED_V2),
             forkchoice_updated_v3: capabilities.contains(ENGINE_FORKCHOICE_UPDATED_V3),
@@ -1104,7 +1145,9 @@ impl HttpJsonRpc {
             get_payload_v2: capabilities.contains(ENGINE_GET_PAYLOAD_V2),
             get_payload_v3: capabilities.contains(ENGINE_GET_PAYLOAD_V3),
             get_payload_v4: capabilities.contains(ENGINE_GET_PAYLOAD_V4),
+            get_payload_v5: capabilities.contains(ENGINE_GET_PAYLOAD_V5),
             get_client_version_v1: capabilities.contains(ENGINE_GET_CLIENT_VERSION_V1),
+            get_blobs_v1: capabilities.contains(ENGINE_GET_BLOBS_V1),
         })
     }
 
@@ -1233,6 +1276,14 @@ impl HttpJsonRpc {
                     Err(Error::RequiredMethodUnsupported("engine_newPayloadV4"))
                 }
             }
+            NewPayloadRequest::Fulu(new_payload_request_fulu) => {
+                // TODO(fulu): switch to v5 endpoint when the EL is ready for Fulu
+                if engine_capabilities.new_payload_v4 {
+                    self.new_payload_v4_fulu(new_payload_request_fulu).await
+                } else {
+                    Err(Error::RequiredMethodUnsupported("engine_newPayloadV4"))
+                }
+            }
         }
     }
 
@@ -1266,6 +1317,14 @@ impl HttpJsonRpc {
                     self.get_payload_v4(fork_name, payload_id).await
                 } else {
                     Err(Error::RequiredMethodUnsupported("engine_getPayloadv4"))
+                }
+            }
+            ForkName::Fulu => {
+                // TODO(fulu): switch to v5 when the EL is ready
+                if engine_capabilities.get_payload_v4 {
+                    self.get_payload_v4(fork_name, payload_id).await
+                } else {
+                    Err(Error::RequiredMethodUnsupported("engine_getPayloadv5"))
                 }
             }
             ForkName::Base | ForkName::Altair => Err(Error::UnsupportedForkVariant(format!(
@@ -1330,7 +1389,7 @@ mod test {
     use std::future::Future;
     use std::str::FromStr;
     use std::sync::Arc;
-    use types::{MainnetEthSpec, Unsigned};
+    use types::{FixedBytesExtended, MainnetEthSpec, Unsigned};
 
     struct Tester {
         server: MockServer<MainnetEthSpec>,
@@ -1340,7 +1399,8 @@ mod test {
 
     impl Tester {
         pub fn new(with_auth: bool) -> Self {
-            let server = MockServer::unit_testing();
+            let spec = Arc::new(MainnetEthSpec::default_spec());
+            let server = MockServer::unit_testing(spec);
 
             let rpc_url = SensitiveUrl::parse(&server.url()).unwrap();
             let echo_url = SensitiveUrl::parse(&format!("{}/echo", server.url())).unwrap();

@@ -14,18 +14,18 @@ use beacon_chain::{
 };
 use genesis::{interop_genesis_state, DEFAULT_ETH1_BLOCK_HASH};
 use int_to_bytes::int_to_bytes32;
-use lazy_static::lazy_static;
 use ssz_types::BitVector;
 use state_processing::{
     per_block_processing::errors::AttestationValidationError, per_slot_processing,
 };
+use std::sync::{Arc, LazyLock};
 use tree_hash::TreeHash;
 use types::{
     signed_aggregate_and_proof::SignedAggregateAndProofRefMut,
     test_utils::generate_deterministic_keypair, Address, AggregateSignature, Attestation,
     AttestationRef, AttestationRefMut, BeaconStateError, BitList, ChainSpec, Epoch, EthSpec,
-    ForkName, Hash256, Keypair, MainnetEthSpec, SecretKey, SelectionProof, SignedAggregateAndProof,
-    Slot, SubnetId, Unsigned,
+    FixedBytesExtended, ForkName, Hash256, Keypair, MainnetEthSpec, SecretKey, SelectionProof,
+    SignedAggregateAndProof, Slot, SubnetId, Unsigned,
 };
 
 pub type E = MainnetEthSpec;
@@ -36,10 +36,12 @@ pub const VALIDATOR_COUNT: usize = 256;
 
 pub const CAPELLA_FORK_EPOCH: usize = 1;
 
-lazy_static! {
-    /// A cached set of keys.
-    static ref KEYPAIRS: Vec<Keypair> = types::test_utils::generate_deterministic_keypairs(VALIDATOR_COUNT);
-}
+// When set to true, cache any states fetched from the db.
+pub const CACHE_STATE_IN_TESTS: bool = true;
+
+/// A cached set of keys.
+static KEYPAIRS: LazyLock<Vec<Keypair>> =
+    LazyLock::new(|| types::test_utils::generate_deterministic_keypairs(VALIDATOR_COUNT));
 
 /// Returns a beacon chain harness.
 fn get_harness(validator_count: usize) -> BeaconChainHarness<EphemeralHarnessType<E>> {
@@ -48,6 +50,7 @@ fn get_harness(validator_count: usize) -> BeaconChainHarness<EphemeralHarnessTyp
     // A kind-of arbitrary number that ensures that _some_ validators are aggregators, but
     // not all.
     spec.target_aggregators_per_committee = 4;
+    let spec = Arc::new(spec);
 
     let harness = BeaconChainHarness::builder(MainnetEthSpec)
         .spec(spec)
@@ -69,11 +72,12 @@ fn get_harness(validator_count: usize) -> BeaconChainHarness<EphemeralHarnessTyp
 /// all genesis validators start with BLS withdrawal credentials.
 fn get_harness_capella_spec(
     validator_count: usize,
-) -> (BeaconChainHarness<EphemeralHarnessType<E>>, ChainSpec) {
+) -> (BeaconChainHarness<EphemeralHarnessType<E>>, Arc<ChainSpec>) {
     let mut spec = E::default_spec();
     spec.altair_fork_epoch = Some(Epoch::new(0));
     spec.bellatrix_fork_epoch = Some(Epoch::new(0));
     spec.capella_fork_epoch = Some(Epoch::new(CAPELLA_FORK_EPOCH as u64));
+    let spec = Arc::new(spec);
 
     let validator_keypairs = KEYPAIRS[0..validator_count].to_vec();
     let genesis_state = interop_genesis_state(
@@ -358,22 +362,24 @@ impl GossipTester {
     }
 
     pub fn earliest_valid_attestation_slot(&self) -> Slot {
-        let offset = match self.harness.spec.fork_name_at_epoch(self.epoch()) {
-            ForkName::Base | ForkName::Altair | ForkName::Bellatrix | ForkName::Capella => {
-                // Subtract an additional slot since the harness will be exactly on the start of the
-                // slot and the propagation tolerance will allow an extra slot.
-                E::slots_per_epoch() + 1
-            }
+        let offset = if self
+            .harness
+            .spec
+            .fork_name_at_epoch(self.epoch())
+            .deneb_enabled()
+        {
             // EIP-7045
-            ForkName::Deneb | ForkName::Electra => {
-                let epoch_slot_offset = (self.slot() % E::slots_per_epoch()).as_u64();
-                if epoch_slot_offset != 0 {
-                    E::slots_per_epoch() + epoch_slot_offset
-                } else {
-                    // Here the propagation tolerance will cause the cutoff to be an entire epoch earlier
-                    2 * E::slots_per_epoch()
-                }
+            let epoch_slot_offset = (self.slot() % E::slots_per_epoch()).as_u64();
+            if epoch_slot_offset != 0 {
+                E::slots_per_epoch() + epoch_slot_offset
+            } else {
+                // Here the propagation tolerance will cause the cutoff to be an entire epoch earlier
+                2 * E::slots_per_epoch()
             }
+        } else {
+            // Subtract an additional slot since the harness will be exactly on the start of the
+            // slot and the propagation tolerance will allow an extra slot.
+            E::slots_per_epoch() + 1
         };
 
         self.slot()
@@ -428,10 +434,12 @@ impl GossipTester {
             .chain
             .verify_aggregated_attestation_for_gossip(&aggregate)
             .err()
-            .expect(&format!(
-                "{} should error during verify_aggregated_attestation_for_gossip",
-                desc
-            ));
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} should error during verify_aggregated_attestation_for_gossip",
+                    desc
+                )
+            });
         inspect_err(&self, err);
 
         /*
@@ -446,10 +454,12 @@ impl GossipTester {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        let batch_err = results.pop().unwrap().err().expect(&format!(
-            "{} should error during batch_verify_aggregated_attestations_for_gossip",
-            desc
-        ));
+        let batch_err = results.pop().unwrap().err().unwrap_or_else(|| {
+            panic!(
+                "{} should error during batch_verify_aggregated_attestations_for_gossip",
+                desc
+            )
+        });
         inspect_err(&self, batch_err);
 
         self
@@ -472,10 +482,12 @@ impl GossipTester {
             .chain
             .verify_unaggregated_attestation_for_gossip(&attn, Some(subnet_id))
             .err()
-            .expect(&format!(
-                "{} should error during verify_unaggregated_attestation_for_gossip",
-                desc
-            ));
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} should error during verify_unaggregated_attestation_for_gossip",
+                    desc
+                )
+            });
         inspect_err(&self, err);
 
         /*
@@ -493,10 +505,12 @@ impl GossipTester {
             )
             .unwrap();
         assert_eq!(results.len(), 2);
-        let batch_err = results.pop().unwrap().err().expect(&format!(
-            "{} should error during batch_verify_unaggregated_attestations_for_gossip",
-            desc
-        ));
+        let batch_err = results.pop().unwrap().err().unwrap_or_else(|| {
+            panic!(
+                "{} should error during batch_verify_unaggregated_attestations_for_gossip",
+                desc
+            )
+        });
         inspect_err(&self, batch_err);
 
         self
@@ -813,7 +827,7 @@ async fn aggregated_gossip_verification() {
                 let (index, sk) = tester.non_aggregator();
                 *a = SignedAggregateAndProof::from_aggregate(
                     index as u64,
-                    tester.valid_aggregate.message().aggregate().clone(),
+                    tester.valid_aggregate.message().aggregate(),
                     None,
                     &sk,
                     &chain.canonical_head.cached_head().head_fork(),
@@ -1214,7 +1228,11 @@ async fn attestation_that_skips_epochs() {
 
     let mut state = harness
         .chain
-        .get_state(&earlier_block.state_root(), Some(earlier_slot))
+        .get_state(
+            &earlier_block.state_root(),
+            Some(earlier_slot),
+            CACHE_STATE_IN_TESTS,
+        )
         .expect("should not error getting state")
         .expect("should find state");
 
@@ -1318,9 +1336,14 @@ async fn attestation_validator_receive_proposer_reward_and_withdrawals() {
         .await;
 
     let current_slot = harness.get_current_slot();
+
     let mut state = harness
         .chain
-        .get_state(&earlier_block.state_root(), Some(earlier_slot))
+        .get_state(
+            &earlier_block.state_root(),
+            Some(earlier_slot),
+            CACHE_STATE_IN_TESTS,
+        )
         .expect("should not error getting state")
         .expect("should find state");
 
@@ -1388,7 +1411,11 @@ async fn attestation_to_finalized_block() {
 
     let mut state = harness
         .chain
-        .get_state(&earlier_block.state_root(), Some(earlier_slot))
+        .get_state(
+            &earlier_block.state_root(),
+            Some(earlier_slot),
+            CACHE_STATE_IN_TESTS,
+        )
         .expect("should not error getting state")
         .expect("should find state");
 

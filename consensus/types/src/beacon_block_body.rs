@@ -13,8 +13,6 @@ use tree_hash_derive::TreeHash;
 
 pub type KzgCommitments<E> =
     VariableList<KzgCommitment, <E as EthSpec>::MaxBlobCommitmentsPerBlock>;
-pub type KzgCommitmentOpts<E> =
-    FixedVector<Option<KzgCommitment>, <E as EthSpec>::MaxBlobsPerBlock>;
 
 /// The number of leaves (including padding) on the `BeaconBlockBody` Merkle tree.
 ///
@@ -30,7 +28,7 @@ pub const BLOB_KZG_COMMITMENTS_INDEX: usize = 11;
 ///
 /// This *superstruct* abstracts over the hard-fork.
 #[superstruct(
-    variants(Base, Altair, Bellatrix, Capella, Deneb, Electra),
+    variants(Base, Altair, Bellatrix, Capella, Deneb, Electra, Fulu),
     variant_attributes(
         derive(
             Debug,
@@ -58,6 +56,7 @@ pub const BLOB_KZG_COMMITMENTS_INDEX: usize = 11;
         Capella(metastruct(mappings(beacon_block_body_capella_fields(groups(fields))))),
         Deneb(metastruct(mappings(beacon_block_body_deneb_fields(groups(fields))))),
         Electra(metastruct(mappings(beacon_block_body_electra_fields(groups(fields))))),
+        Fulu(metastruct(mappings(beacon_block_body_fulu_fields(groups(fields)))))
     ),
     cast_error(ty = "Error", expr = "Error::IncorrectStateVariant"),
     partial_getter_error(ty = "Error", expr = "Error::IncorrectStateVariant")
@@ -77,7 +76,10 @@ pub struct BeaconBlockBody<E: EthSpec, Payload: AbstractExecPayload<E> = FullPay
         partial_getter(rename = "attester_slashings_base")
     )]
     pub attester_slashings: VariableList<AttesterSlashingBase<E>, E::MaxAttesterSlashings>,
-    #[superstruct(only(Electra), partial_getter(rename = "attester_slashings_electra"))]
+    #[superstruct(
+        only(Electra, Fulu),
+        partial_getter(rename = "attester_slashings_electra")
+    )]
     pub attester_slashings:
         VariableList<AttesterSlashingElectra<E>, E::MaxAttesterSlashingsElectra>,
     #[superstruct(
@@ -85,11 +87,11 @@ pub struct BeaconBlockBody<E: EthSpec, Payload: AbstractExecPayload<E> = FullPay
         partial_getter(rename = "attestations_base")
     )]
     pub attestations: VariableList<AttestationBase<E>, E::MaxAttestations>,
-    #[superstruct(only(Electra), partial_getter(rename = "attestations_electra"))]
+    #[superstruct(only(Electra, Fulu), partial_getter(rename = "attestations_electra"))]
     pub attestations: VariableList<AttestationElectra<E>, E::MaxAttestationsElectra>,
     pub deposits: VariableList<Deposit, E::MaxDeposits>,
     pub voluntary_exits: VariableList<SignedVoluntaryExit, E::MaxVoluntaryExits>,
-    #[superstruct(only(Altair, Bellatrix, Capella, Deneb, Electra))]
+    #[superstruct(only(Altair, Bellatrix, Capella, Deneb, Electra, Fulu))]
     pub sync_aggregate: SyncAggregate<E>,
     // We flatten the execution payload so that serde can use the name of the inner type,
     // either `execution_payload` for full payloads, or `execution_payload_header` for blinded
@@ -109,13 +111,16 @@ pub struct BeaconBlockBody<E: EthSpec, Payload: AbstractExecPayload<E> = FullPay
     #[superstruct(only(Electra), partial_getter(rename = "execution_payload_electra"))]
     #[serde(flatten)]
     pub execution_payload: Payload::Electra,
-    #[superstruct(only(Capella, Deneb, Electra))]
+    #[superstruct(only(Fulu), partial_getter(rename = "execution_payload_fulu"))]
+    #[serde(flatten)]
+    pub execution_payload: Payload::Fulu,
+    #[superstruct(only(Capella, Deneb, Electra, Fulu))]
     pub bls_to_execution_changes:
         VariableList<SignedBlsToExecutionChange, E::MaxBlsToExecutionChanges>,
-    #[superstruct(only(Deneb, Electra))]
+    #[superstruct(only(Deneb, Electra, Fulu))]
     pub blob_kzg_commitments: KzgCommitments<E>,
-    #[superstruct(only(Electra))]
-    pub consolidations: VariableList<SignedConsolidation, E::MaxConsolidations>,
+    #[superstruct(only(Electra, Fulu))]
+    pub execution_requests: ExecutionRequests<E>,
     #[superstruct(only(Base, Altair))]
     #[metastruct(exclude_from(fields))]
     #[ssz(skip_serializing, skip_deserializing)]
@@ -129,6 +134,11 @@ impl<E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBody<E, Payload> {
     pub fn execution_payload(&self) -> Result<Payload::Ref<'_>, Error> {
         self.to_ref().execution_payload()
     }
+
+    /// Returns the name of the fork pertaining to `self`.
+    pub fn fork_name(&self) -> ForkName {
+        self.to_ref().fork_name()
+    }
 }
 
 impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, Payload> {
@@ -139,10 +149,11 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, 
             Self::Capella(body) => Ok(Payload::Ref::from(&body.execution_payload)),
             Self::Deneb(body) => Ok(Payload::Ref::from(&body.execution_payload)),
             Self::Electra(body) => Ok(Payload::Ref::from(&body.execution_payload)),
+            Self::Fulu(body) => Ok(Payload::Ref::from(&body.execution_payload)),
         }
     }
 
-    fn body_merkle_leaves(&self) -> Vec<Hash256> {
+    pub(crate) fn body_merkle_leaves(&self) -> Vec<Hash256> {
         let mut leaves = vec![];
         match self {
             Self::Base(body) => {
@@ -169,61 +180,79 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, 
                 beacon_block_body_electra_fields!(body, |_, field| leaves
                     .push(field.tree_hash_root()));
             }
+            Self::Fulu(body) => {
+                beacon_block_body_fulu_fields!(body, |_, field| leaves
+                    .push(field.tree_hash_root()));
+            }
         }
         leaves
     }
 
-    /// Produces the proof of inclusion for a `KzgCommitment` in `self.blob_kzg_commitments`
-    /// at `index`.
+    /// Calculate a KZG commitment merkle proof.
+    ///
+    /// Prefer to use `complete_kzg_commitment_merkle_proof` with a reused proof for the
+    /// `blob_kzg_commitments` field.
     pub fn kzg_commitment_merkle_proof(
         &self,
         index: usize,
     ) -> Result<FixedVector<Hash256, E::KzgCommitmentInclusionProofDepth>, Error> {
-        // We compute the branches by generating 2 merkle trees:
-        // 1. Merkle tree for the `blob_kzg_commitments` List object
-        // 2. Merkle tree for the `BeaconBlockBody` container
-        // We then merge the branches for both the trees all the way up to the root.
+        let kzg_commitments_proof = self.kzg_commitments_merkle_proof()?;
+        let proof = self.complete_kzg_commitment_merkle_proof(index, &kzg_commitments_proof)?;
+        Ok(proof)
+    }
 
-        // Part1 (Branches for the subtree rooted at `blob_kzg_commitments`)
-        //
-        // Branches for `blob_kzg_commitments` without length mix-in
-        let blob_leaves = self
-            .blob_kzg_commitments()?
-            .iter()
-            .map(|commitment| commitment.tree_hash_root())
-            .collect::<Vec<_>>();
-        let depth = E::max_blob_commitments_per_block()
-            .next_power_of_two()
-            .ilog2();
-        let tree = MerkleTree::create(&blob_leaves, depth as usize);
-        let (_, mut proof) = tree
-            .generate_proof(index, depth as usize)
-            .map_err(Error::MerkleTreeError)?;
+    /// Produces the proof of inclusion for a `KzgCommitment` in `self.blob_kzg_commitments`
+    /// at `index` using an existing proof for the `blob_kzg_commitments` field.
+    pub fn complete_kzg_commitment_merkle_proof(
+        &self,
+        index: usize,
+        kzg_commitments_proof: &[Hash256],
+    ) -> Result<FixedVector<Hash256, E::KzgCommitmentInclusionProofDepth>, Error> {
+        match self {
+            Self::Base(_) | Self::Altair(_) | Self::Bellatrix(_) | Self::Capella(_) => {
+                Err(Error::IncorrectStateVariant)
+            }
+            Self::Deneb(_) | Self::Electra(_) | Self::Fulu(_) => {
+                // We compute the branches by generating 2 merkle trees:
+                // 1. Merkle tree for the `blob_kzg_commitments` List object
+                // 2. Merkle tree for the `BeaconBlockBody` container
+                // We then merge the branches for both the trees all the way up to the root.
 
-        // Add the branch corresponding to the length mix-in.
-        let length = blob_leaves.len();
-        let usize_len = std::mem::size_of::<usize>();
-        let mut length_bytes = [0; BYTES_PER_CHUNK];
-        length_bytes
-            .get_mut(0..usize_len)
-            .ok_or(Error::MerkleTreeError(MerkleTreeError::PleaseNotifyTheDevs))?
-            .copy_from_slice(&length.to_le_bytes());
-        let length_root = Hash256::from_slice(length_bytes.as_slice());
-        proof.push(length_root);
+                // Part1 (Branches for the subtree rooted at `blob_kzg_commitments`)
+                //
+                // Branches for `blob_kzg_commitments` without length mix-in
+                let blob_leaves = self
+                    .blob_kzg_commitments()?
+                    .iter()
+                    .map(|commitment| commitment.tree_hash_root())
+                    .collect::<Vec<_>>();
+                let depth = E::max_blob_commitments_per_block()
+                    .next_power_of_two()
+                    .ilog2();
+                let tree = MerkleTree::create(&blob_leaves, depth as usize);
+                let (_, mut proof) = tree
+                    .generate_proof(index, depth as usize)
+                    .map_err(Error::MerkleTreeError)?;
 
-        // Part 2
-        // Branches for `BeaconBlockBody` container
-        let body_leaves = self.body_merkle_leaves();
-        let beacon_block_body_depth = body_leaves.len().next_power_of_two().ilog2() as usize;
-        let tree = MerkleTree::create(&body_leaves, beacon_block_body_depth);
-        let (_, mut proof_body) = tree
-            .generate_proof(BLOB_KZG_COMMITMENTS_INDEX, beacon_block_body_depth)
-            .map_err(Error::MerkleTreeError)?;
-        // Join the proofs for the subtree and the main tree
-        proof.append(&mut proof_body);
-        debug_assert_eq!(proof.len(), E::kzg_proof_inclusion_proof_depth());
+                // Add the branch corresponding to the length mix-in.
+                let length = blob_leaves.len();
+                let usize_len = std::mem::size_of::<usize>();
+                let mut length_bytes = [0; BYTES_PER_CHUNK];
+                length_bytes
+                    .get_mut(0..usize_len)
+                    .ok_or(Error::MerkleTreeError(MerkleTreeError::PleaseNotifyTheDevs))?
+                    .copy_from_slice(&length.to_le_bytes());
+                let length_root = Hash256::from_slice(length_bytes.as_slice());
+                proof.push(length_root);
 
-        Ok(proof.into())
+                // Part 2
+                // Branches for `BeaconBlockBody` container
+                // Join the proofs for the subtree and the main tree
+                proof.extend_from_slice(kzg_commitments_proof);
+
+                Ok(FixedVector::new(proof)?)
+            }
+        }
     }
 
     /// Produces the proof of inclusion for `self.blob_kzg_commitments`.
@@ -236,13 +265,35 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, 
         let (_, proof) = tree
             .generate_proof(BLOB_KZG_COMMITMENTS_INDEX, beacon_block_body_depth)
             .map_err(Error::MerkleTreeError)?;
-        Ok(proof.into())
+        Ok(FixedVector::new(proof)?)
+    }
+
+    pub fn block_body_merkle_proof(&self, generalized_index: usize) -> Result<Vec<Hash256>, Error> {
+        let field_index = match generalized_index {
+            light_client_update::EXECUTION_PAYLOAD_INDEX => {
+                // Execution payload is a top-level field, subtract off the generalized indices
+                // for the internal nodes. Result should be 9, the field offset of the execution
+                // payload in the `BeaconBlockBody`:
+                // https://github.com/ethereum/consensus-specs/blob/dev/specs/deneb/beacon-chain.md#beaconblockbody
+                generalized_index
+                    .checked_sub(NUM_BEACON_BLOCK_BODY_HASH_TREE_ROOT_LEAVES)
+                    .ok_or(Error::GeneralizedIndexNotSupported(generalized_index))?
+            }
+            _ => return Err(Error::GeneralizedIndexNotSupported(generalized_index)),
+        };
+
+        let leaves = self.body_merkle_leaves();
+        let depth = light_client_update::EXECUTION_PAYLOAD_PROOF_LEN;
+        let tree = merkle_proof::MerkleTree::create(&leaves, depth);
+        let (_, proof) = tree.generate_proof(field_index, depth)?;
+
+        Ok(proof)
     }
 
     /// Return `true` if this block body has a non-zero number of blobs.
     pub fn has_blobs(self) -> bool {
         self.blob_kzg_commitments()
-            .map_or(false, |blobs| !blobs.is_empty())
+            .is_ok_and(|blobs| !blobs.is_empty())
     }
 
     pub fn attestations_len(&self) -> usize {
@@ -253,6 +304,7 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, 
             Self::Capella(body) => body.attestations.len(),
             Self::Deneb(body) => body.attestations.len(),
             Self::Electra(body) => body.attestations.len(),
+            Self::Fulu(body) => body.attestations.len(),
         }
     }
 
@@ -264,6 +316,7 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, 
             Self::Capella(body) => body.attester_slashings.len(),
             Self::Deneb(body) => body.attester_slashings.len(),
             Self::Electra(body) => body.attester_slashings.len(),
+            Self::Fulu(body) => body.attester_slashings.len(),
         }
     }
 
@@ -275,6 +328,7 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, 
             Self::Capella(body) => Box::new(body.attestations.iter().map(AttestationRef::Base)),
             Self::Deneb(body) => Box::new(body.attestations.iter().map(AttestationRef::Base)),
             Self::Electra(body) => Box::new(body.attestations.iter().map(AttestationRef::Electra)),
+            Self::Fulu(body) => Box::new(body.attestations.iter().map(AttestationRef::Electra)),
         }
     }
 
@@ -310,6 +364,11 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, 
                     .iter()
                     .map(AttesterSlashingRef::Electra),
             ),
+            Self::Fulu(body) => Box::new(
+                body.attester_slashings
+                    .iter()
+                    .map(AttesterSlashingRef::Electra),
+            ),
         }
     }
 }
@@ -335,11 +394,14 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRefMut<'a, 
             Self::Electra(body) => {
                 Box::new(body.attestations.iter_mut().map(AttestationRefMut::Electra))
             }
+            Self::Fulu(body) => {
+                Box::new(body.attestations.iter_mut().map(AttestationRefMut::Electra))
+            }
         }
     }
 }
 
-impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, Payload> {
+impl<E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'_, E, Payload> {
     /// Get the fork_name of this object
     pub fn fork_name(self) -> ForkName {
         match self {
@@ -349,6 +411,7 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, 
             BeaconBlockBodyRef::Capella { .. } => ForkName::Capella,
             BeaconBlockBodyRef::Deneb { .. } => ForkName::Deneb,
             BeaconBlockBodyRef::Electra { .. } => ForkName::Electra,
+            BeaconBlockBodyRef::Fulu { .. } => ForkName::Fulu,
         }
     }
 }
@@ -637,7 +700,7 @@ impl<E: EthSpec> From<BeaconBlockBodyElectra<E, FullPayload<E>>>
             execution_payload: FullPayloadElectra { execution_payload },
             bls_to_execution_changes,
             blob_kzg_commitments,
-            consolidations,
+            execution_requests,
         } = body;
 
         (
@@ -656,7 +719,53 @@ impl<E: EthSpec> From<BeaconBlockBodyElectra<E, FullPayload<E>>>
                 },
                 bls_to_execution_changes,
                 blob_kzg_commitments: blob_kzg_commitments.clone(),
-                consolidations,
+                execution_requests,
+            },
+            Some(execution_payload),
+        )
+    }
+}
+
+impl<E: EthSpec> From<BeaconBlockBodyFulu<E, FullPayload<E>>>
+    for (
+        BeaconBlockBodyFulu<E, BlindedPayload<E>>,
+        Option<ExecutionPayloadFulu<E>>,
+    )
+{
+    fn from(body: BeaconBlockBodyFulu<E, FullPayload<E>>) -> Self {
+        let BeaconBlockBodyFulu {
+            randao_reveal,
+            eth1_data,
+            graffiti,
+            proposer_slashings,
+            attester_slashings,
+            attestations,
+            deposits,
+            voluntary_exits,
+            sync_aggregate,
+            execution_payload: FullPayloadFulu { execution_payload },
+            bls_to_execution_changes,
+            blob_kzg_commitments,
+            execution_requests,
+        } = body;
+
+        (
+            BeaconBlockBodyFulu {
+                randao_reveal,
+                eth1_data,
+                graffiti,
+                proposer_slashings,
+                attester_slashings,
+                attestations,
+                deposits,
+                voluntary_exits,
+                sync_aggregate,
+                execution_payload: BlindedPayloadFulu {
+                    execution_payload_header: From::from(&execution_payload),
+                },
+                bls_to_execution_changes,
+                blob_kzg_commitments: blob_kzg_commitments.clone(),
+                execution_requests,
             },
             Some(execution_payload),
         )
@@ -795,7 +904,7 @@ impl<E: EthSpec> BeaconBlockBodyElectra<E, FullPayload<E>> {
             execution_payload: FullPayloadElectra { execution_payload },
             bls_to_execution_changes,
             blob_kzg_commitments,
-            consolidations,
+            execution_requests,
         } = self;
 
         BeaconBlockBodyElectra {
@@ -813,7 +922,45 @@ impl<E: EthSpec> BeaconBlockBodyElectra<E, FullPayload<E>> {
             },
             bls_to_execution_changes: bls_to_execution_changes.clone(),
             blob_kzg_commitments: blob_kzg_commitments.clone(),
-            consolidations: consolidations.clone(),
+            execution_requests: execution_requests.clone(),
+        }
+    }
+}
+
+impl<E: EthSpec> BeaconBlockBodyFulu<E, FullPayload<E>> {
+    pub fn clone_as_blinded(&self) -> BeaconBlockBodyFulu<E, BlindedPayload<E>> {
+        let BeaconBlockBodyFulu {
+            randao_reveal,
+            eth1_data,
+            graffiti,
+            proposer_slashings,
+            attester_slashings,
+            attestations,
+            deposits,
+            voluntary_exits,
+            sync_aggregate,
+            execution_payload: FullPayloadFulu { execution_payload },
+            bls_to_execution_changes,
+            blob_kzg_commitments,
+            execution_requests,
+        } = self;
+
+        BeaconBlockBodyFulu {
+            randao_reveal: randao_reveal.clone(),
+            eth1_data: eth1_data.clone(),
+            graffiti: *graffiti,
+            proposer_slashings: proposer_slashings.clone(),
+            attester_slashings: attester_slashings.clone(),
+            attestations: attestations.clone(),
+            deposits: deposits.clone(),
+            voluntary_exits: voluntary_exits.clone(),
+            sync_aggregate: sync_aggregate.clone(),
+            execution_payload: BlindedPayloadFulu {
+                execution_payload_header: execution_payload.into(),
+            },
+            bls_to_execution_changes: bls_to_execution_changes.clone(),
+            blob_kzg_commitments: blob_kzg_commitments.clone(),
+            execution_requests: execution_requests.clone(),
         }
     }
 }
@@ -824,78 +971,12 @@ impl<E: EthSpec> From<BeaconBlockBody<E, FullPayload<E>>>
         Option<ExecutionPayload<E>>,
     )
 {
+    #[allow(clippy::useless_conversion)] // Not a useless conversion
     fn from(body: BeaconBlockBody<E, FullPayload<E>>) -> Self {
         map_beacon_block_body!(body, |inner, cons| {
             let (block, payload) = inner.into();
             (cons(block), payload.map(Into::into))
         })
-    }
-}
-
-impl<E: EthSpec> BeaconBlockBody<E> {
-    /// Returns the name of the fork pertaining to `self`.
-    pub fn fork_name(&self) -> ForkName {
-        self.to_ref().fork_name()
-    }
-
-    pub fn block_body_merkle_proof(&self, generalized_index: usize) -> Result<Vec<Hash256>, Error> {
-        let field_index = match generalized_index {
-            light_client_update::EXECUTION_PAYLOAD_INDEX => {
-                // Execution payload is a top-level field, subtract off the generalized indices
-                // for the internal nodes. Result should be 9, the field offset of the execution
-                // payload in the `BeaconBlockBody`:
-                // https://github.com/ethereum/consensus-specs/blob/dev/specs/deneb/beacon-chain.md#beaconblockbody
-                generalized_index
-                    .checked_sub(NUM_BEACON_BLOCK_BODY_HASH_TREE_ROOT_LEAVES)
-                    .ok_or(Error::IndexNotSupported(generalized_index))?
-            }
-            _ => return Err(Error::IndexNotSupported(generalized_index)),
-        };
-
-        let attestations_root = if self.fork_name() > ForkName::Electra {
-            self.attestations_electra()?.tree_hash_root()
-        } else {
-            self.attestations_base()?.tree_hash_root()
-        };
-
-        let attester_slashings_root = if self.fork_name() > ForkName::Electra {
-            self.attester_slashings_electra()?.tree_hash_root()
-        } else {
-            self.attester_slashings_base()?.tree_hash_root()
-        };
-
-        let mut leaves = vec![
-            self.randao_reveal().tree_hash_root(),
-            self.eth1_data().tree_hash_root(),
-            self.graffiti().tree_hash_root(),
-            self.proposer_slashings().tree_hash_root(),
-            attester_slashings_root,
-            attestations_root,
-            self.deposits().tree_hash_root(),
-            self.voluntary_exits().tree_hash_root(),
-        ];
-
-        if let Ok(sync_aggregate) = self.sync_aggregate() {
-            leaves.push(sync_aggregate.tree_hash_root())
-        }
-
-        if let Ok(execution_payload) = self.execution_payload() {
-            leaves.push(execution_payload.tree_hash_root())
-        }
-
-        if let Ok(bls_to_execution_changes) = self.bls_to_execution_changes() {
-            leaves.push(bls_to_execution_changes.tree_hash_root())
-        }
-
-        if let Ok(blob_kzg_commitments) = self.blob_kzg_commitments() {
-            leaves.push(blob_kzg_commitments.tree_hash_root())
-        }
-
-        let depth = light_client_update::EXECUTION_PAYLOAD_PROOF_LEN;
-        let tree = merkle_proof::MerkleTree::create(&leaves, depth);
-        let (_, proof) = tree.generate_proof(field_index, depth)?;
-
-        Ok(proof)
     }
 }
 

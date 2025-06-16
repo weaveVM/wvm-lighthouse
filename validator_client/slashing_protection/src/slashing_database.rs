@@ -513,7 +513,7 @@ impl SlashingDatabase {
         txn.execute(
             "INSERT INTO signed_blocks (validator_id, slot, signing_root)
              VALUES (?1, ?2, ?3)",
-            params![validator_id, slot, signing_root.to_hash256_raw().as_bytes()],
+            params![validator_id, slot, signing_root.to_hash256_raw().as_slice()],
         )?;
         Ok(())
     }
@@ -539,7 +539,7 @@ impl SlashingDatabase {
                 validator_id,
                 att_source_epoch,
                 att_target_epoch,
-                att_signing_root.to_hash256_raw().as_bytes()
+                att_signing_root.to_hash256_raw().as_slice()
             ],
         )?;
         Ok(())
@@ -1113,9 +1113,7 @@ fn max_or<T: Copy + Ord>(opt_x: Option<T>, y: T) -> T {
 ///
 /// If prev is `None` and `new` is `Some` then `true` is returned.
 fn monotonic<T: PartialOrd>(new: Option<T>, prev: Option<T>) -> bool {
-    new.map_or(false, |new_val| {
-        prev.map_or(true, |prev_val| new_val >= prev_val)
-    })
+    new.is_some_and(|new_val| prev.is_none_or(|prev_val| new_val >= prev_val))
 }
 
 /// The result of importing a single entry from an interchange file.

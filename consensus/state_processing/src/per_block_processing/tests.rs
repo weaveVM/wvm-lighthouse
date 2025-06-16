@@ -11,8 +11,8 @@ use crate::{
     BlockSignatureStrategy, ConsensusContext, VerifyBlockRoot, VerifySignatures,
 };
 use beacon_chain::test_utils::{BeaconChainHarness, EphemeralHarnessType};
-use lazy_static::lazy_static;
 use ssz_types::Bitfield;
+use std::sync::{Arc, LazyLock};
 use test_utils::generate_deterministic_keypairs;
 use types::*;
 
@@ -22,10 +22,12 @@ pub const VALIDATOR_COUNT: usize = 64;
 pub const EPOCH_OFFSET: u64 = 4;
 pub const NUM_ATTESTATIONS: u64 = 1;
 
-lazy_static! {
-    /// A cached set of keys.
-    static ref KEYPAIRS: Vec<Keypair> = generate_deterministic_keypairs(MAX_VALIDATOR_COUNT);
-}
+// When set to true, cache any states fetched from the db.
+pub const CACHE_STATE_IN_TESTS: bool = true;
+
+/// A cached set of keys.
+static KEYPAIRS: LazyLock<Vec<Keypair>> =
+    LazyLock::new(|| generate_deterministic_keypairs(MAX_VALIDATOR_COUNT));
 
 async fn get_harness<E: EthSpec>(
     epoch_offset: u64,
@@ -1018,6 +1020,7 @@ async fn fork_spanning_exit() {
     spec.altair_fork_epoch = Some(Epoch::new(2));
     spec.bellatrix_fork_epoch = Some(Epoch::new(4));
     spec.shard_committee_period = 0;
+    let spec = Arc::new(spec);
 
     let harness = BeaconChainHarness::builder(MainnetEthSpec)
         .spec(spec.clone())
@@ -1114,9 +1117,10 @@ async fn block_replayer_peeking_state_roots() {
         .get_blinded_block(&parent_block_root)
         .unwrap()
         .unwrap();
+    // Cache the state to make CI go brr.
     let parent_state = harness
         .chain
-        .get_state(&parent_block.state_root(), Some(parent_block.slot()))
+        .get_state(&parent_block.state_root(), Some(parent_block.slot()), true)
         .unwrap()
         .unwrap();
 

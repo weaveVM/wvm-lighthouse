@@ -1,10 +1,10 @@
 //! The subnet predicate used for searching for a particular subnet.
 use super::*;
 use crate::types::{EnrAttestationBitfield, EnrSyncCommitteeBitfield};
-use itertools::Itertools;
 use slog::trace;
 use std::ops::Deref;
-use types::{ChainSpec, DataColumnSubnetId};
+use types::data_column_custody_group::compute_subnets_for_node;
+use types::ChainSpec;
 
 /// Returns the predicate for a given subnet.
 pub fn subnet_predicate<E>(
@@ -29,23 +29,20 @@ where
         let sync_committee_bitfield: Result<EnrSyncCommitteeBitfield<E>, _> =
             enr.sync_committee_bitfield::<E>();
 
-        // TODO(das): compute from enr
-        let custody_subnet_count = spec.custody_requirement;
-
         let predicate = subnets.iter().any(|subnet| match subnet {
             Subnet::Attestation(s) => attestation_bitfield
                 .get(*s.deref() as usize)
                 .unwrap_or(false),
             Subnet::SyncCommittee(s) => sync_committee_bitfield
                 .as_ref()
-                .map_or(false, |b| b.get(*s.deref() as usize).unwrap_or(false)),
+                .is_ok_and(|b| b.get(*s.deref() as usize).unwrap_or(false)),
             Subnet::DataColumn(s) => {
-                let mut subnets = DataColumnSubnetId::compute_custody_subnets::<E>(
-                    enr.node_id().raw().into(),
-                    custody_subnet_count,
-                    &spec,
-                );
-                subnets.contains(s)
+                if let Ok(custody_group_count) = enr.custody_group_count::<E>(&spec) {
+                    compute_subnets_for_node(enr.node_id().raw(), custody_group_count, &spec)
+                        .is_ok_and(|subnets| subnets.contains(s))
+                } else {
+                    false
+                }
             }
         });
 

@@ -1,7 +1,8 @@
+use account_utils::{read_input_from_user, STDIN_INPUTS_FLAG};
 use beacon_chain::chain_config::{
     DisallowedReOrgOffsets, ReOrgThreshold, DEFAULT_PREPARE_PAYLOAD_LOOKAHEAD_FACTOR,
     DEFAULT_RE_ORG_HEAD_THRESHOLD, DEFAULT_RE_ORG_MAX_EPOCHS_SINCE_FINALIZATION,
-    DEFAULT_RE_ORG_PARENT_THRESHOLD,
+    DEFAULT_RE_ORG_PARENT_THRESHOLD, INVALID_HOLESKY_BLOCK_ROOT,
 };
 use beacon_chain::graffiti_calculator::GraffitiOrigin;
 use beacon_chain::TrustedSetup;
@@ -19,8 +20,10 @@ use lighthouse_network::{multiaddr::Protocol, Enr, Multiaddr, NetworkConfig, Pee
 use sensitive_url::SensitiveUrl;
 use slog::{info, warn, Logger};
 use std::cmp::max;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::fs;
+use std::io::{IsTerminal, Read};
 use std::net::Ipv6Addr;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::num::NonZeroU16;
@@ -29,6 +32,8 @@ use std::str::FromStr;
 use std::time::Duration;
 use types::graffiti::GraffitiString;
 use types::{Checkpoint, Epoch, EthSpec, Hash256, PublicKeyBytes};
+
+const PURGE_DB_CONFIRMATION: &str = "confirm";
 
 /// Gets the fully-initialized global client.
 ///
@@ -50,26 +55,45 @@ pub fn get_config<E: EthSpec>(
     client_config.set_data_dir(get_data_dir(cli_args));
 
     // If necessary, remove any existing database and configuration
-    if client_config.data_dir().exists() && cli_args.get_flag("purge-db") {
-        // Remove the chain_db.
-        let chain_db = client_config.get_db_path();
-        if chain_db.exists() {
-            fs::remove_dir_all(chain_db)
-                .map_err(|err| format!("Failed to remove chain_db: {}", err))?;
-        }
+    if client_config.data_dir().exists() {
+        if cli_args.get_flag("purge-db-force") {
+            let chain_db = client_config.get_db_path();
+            let freezer_db = client_config.get_freezer_db_path();
+            let blobs_db = client_config.get_blobs_db_path();
+            purge_db(chain_db, freezer_db, blobs_db)?;
+        } else if cli_args.get_flag("purge-db") {
+            let stdin_inputs = cfg!(windows) || cli_args.get_flag(STDIN_INPUTS_FLAG);
+            if std::io::stdin().is_terminal() || stdin_inputs {
+                info!(
+                    log,
+                    "You are about to delete the chain database. This is irreversable \
+                    and you will need to resync the chain."
+                );
+                info!(
+                    log,
+                    "Type 'confirm' to delete the database. Any other input will leave \
+                    the database intact and Lighthouse will exit."
+                );
+                let confirmation = read_input_from_user(stdin_inputs)?;
 
-        // Remove the freezer db.
-        let freezer_db = client_config.get_freezer_db_path();
-        if freezer_db.exists() {
-            fs::remove_dir_all(freezer_db)
-                .map_err(|err| format!("Failed to remove freezer_db: {}", err))?;
-        }
-
-        // Remove the blobs db.
-        let blobs_db = client_config.get_blobs_db_path();
-        if blobs_db.exists() {
-            fs::remove_dir_all(blobs_db)
-                .map_err(|err| format!("Failed to remove blobs_db: {}", err))?;
+                if confirmation == PURGE_DB_CONFIRMATION {
+                    let chain_db = client_config.get_db_path();
+                    let freezer_db = client_config.get_freezer_db_path();
+                    let blobs_db = client_config.get_blobs_db_path();
+                    purge_db(chain_db, freezer_db, blobs_db)?;
+                    info!(log, "Database was deleted.");
+                } else {
+                    info!(log, "Database was not deleted. Lighthouse will now close.");
+                    std::process::exit(1);
+                }
+            } else {
+                warn!(
+                    log,
+                    "The `--purge-db` flag was passed, but Lighthouse is not running \
+                    interactively. The database was not purged. Use `--purge-db-force` \
+                    to purge the database without requiring confirmation."
+                );
+            }
         }
     }
 
@@ -98,7 +122,6 @@ pub fn get_config<E: EthSpec>(
 
     if cli_args.get_flag("staking") {
         client_config.http_api.enabled = true;
-        client_config.sync_eth1_chain = true;
     }
 
     /*
@@ -129,14 +152,6 @@ pub fn get_config<E: EthSpec>(
             client_config.http_api.allow_origin = Some(allow_origin.to_string());
         }
 
-        if cli_args.get_one::<String>("http-spec-fork").is_some() {
-            warn!(
-                log,
-                "Ignoring --http-spec-fork";
-                "info" => "this flag is deprecated and will be removed"
-            );
-        }
-
         if cli_args.get_flag("http-enable-tls") {
             client_config.http_api.tls_config = Some(TlsConfig {
                 cert: cli_args
@@ -152,14 +167,6 @@ pub fn get_config<E: EthSpec>(
             });
         }
 
-        if cli_args.get_flag("http-allow-sync-stalled") {
-            warn!(
-                log,
-                "Ignoring --http-allow-sync-stalled";
-                "info" => "this flag is deprecated and will be removed"
-            );
-        }
-
         client_config.http_api.sse_capacity_multiplier =
             parse_required(cli_args, "http-sse-capacity-multiplier")?;
 
@@ -170,15 +177,42 @@ pub fn get_config<E: EthSpec>(
             parse_required(cli_args, "http-duplicate-block-status")?;
 
         client_config.http_api.enable_light_client_server =
-            cli_args.get_flag("light-client-server");
+            !cli_args.get_flag("disable-light-client-server");
     }
 
     if cli_args.get_flag("light-client-server") {
-        client_config.chain.enable_light_client_server = true;
+        warn!(
+            log,
+            "The --light-client-server flag is deprecated. The light client server is enabled \
+             by default"
+        );
+    }
+
+    if cli_args.get_flag("disable-light-client-server") {
+        client_config.chain.enable_light_client_server = false;
+    }
+
+    if let Some(sync_tolerance_epochs) =
+        clap_utils::parse_optional(cli_args, "sync-tolerance-epochs")?
+    {
+        client_config.chain.sync_tolerance_epochs = sync_tolerance_epochs;
     }
 
     if let Some(cache_size) = clap_utils::parse_optional(cli_args, "shuffling-cache-size")? {
         client_config.chain.shuffling_cache_size = cache_size;
+    }
+
+    if cli_args.get_flag("enable-sampling") {
+        client_config.chain.enable_sampling = true;
+    }
+
+    if let Some(batches) = clap_utils::parse_optional(cli_args, "blob-publication-batches")? {
+        client_config.chain.blob_publication_batches = batches;
+    }
+
+    if let Some(interval) = clap_utils::parse_optional(cli_args, "blob-publication-batch-interval")?
+    {
+        client_config.chain.blob_publication_batch_interval = Duration::from_millis(interval);
     }
 
     /*
@@ -243,18 +277,12 @@ pub fn get_config<E: EthSpec>(
      * Eth1
      */
 
-    // When present, use an eth1 backend that generates deterministic junk.
-    //
-    // Useful for running testnets without the overhead of a deposit contract.
     if cli_args.get_flag("dummy-eth1") {
-        client_config.dummy_eth1_backend = true;
+        warn!(log, "The --dummy-eth1 flag is deprecated");
     }
 
-    // When present, attempt to sync to an eth1 node.
-    //
-    // Required for block production.
     if cli_args.get_flag("eth1") {
-        client_config.sync_eth1_chain = true;
+        warn!(log, "The --eth1 flag is deprecated");
     }
 
     if let Some(val) = cli_args.get_one::<String>("eth1-blocks-per-log-query") {
@@ -273,109 +301,96 @@ pub fn get_config<E: EthSpec>(
         client_config.eth1.cache_follow_distance = Some(follow_distance);
     }
 
-    if let Some(endpoints) = cli_args.get_one::<String>("execution-endpoint") {
-        let mut el_config = execution_layer::Config::default();
+    // `--execution-endpoint` is required now.
+    let endpoints: String = clap_utils::parse_required(cli_args, "execution-endpoint")?;
+    let mut el_config = execution_layer::Config::default();
 
-        // Always follow the deposit contract when there is an execution endpoint.
-        //
-        // This is wasteful for non-staking nodes as they have no need to process deposit contract
-        // logs and build an "eth1" cache. The alternative is to explicitly require the `--eth1` or
-        // `--staking` flags, however that poses a risk to stakers since they cannot produce blocks
-        // without "eth1".
-        //
-        // The waste for non-staking nodes is relatively small so we err on the side of safety for
-        // stakers. The merge is already complicated enough.
-        client_config.sync_eth1_chain = true;
+    // Parse a single execution endpoint, logging warnings if multiple endpoints are supplied.
+    let execution_endpoint = parse_only_one_value(
+        endpoints.as_str(),
+        SensitiveUrl::parse,
+        "--execution-endpoint",
+        log,
+    )?;
 
-        // Parse a single execution endpoint, logging warnings if multiple endpoints are supplied.
-        let execution_endpoint =
-            parse_only_one_value(endpoints, SensitiveUrl::parse, "--execution-endpoint", log)?;
+    // JWTs are required if `--execution-endpoint` is supplied. They can be either passed via
+    // file_path or directly as string.
 
-        // JWTs are required if `--execution-endpoint` is supplied. They can be either passed via
-        // file_path or directly as string.
+    let secret_file: PathBuf;
+    // Parse a single JWT secret from a given file_path, logging warnings if multiple are supplied.
+    if let Some(secret_files) = cli_args.get_one::<String>("execution-jwt") {
+        secret_file =
+            parse_only_one_value(secret_files, PathBuf::from_str, "--execution-jwt", log)?;
 
-        let secret_file: PathBuf;
-        // Parse a single JWT secret from a given file_path, logging warnings if multiple are supplied.
-        if let Some(secret_files) = cli_args.get_one::<String>("execution-jwt") {
-            secret_file =
-                parse_only_one_value(secret_files, PathBuf::from_str, "--execution-jwt", log)?;
-
-        // Check if the JWT secret key is passed directly via cli flag and persist it to the default
-        // file location.
-        } else if let Some(jwt_secret_key) = cli_args.get_one::<String>("execution-jwt-secret-key")
-        {
-            use std::fs::File;
-            use std::io::Write;
-            secret_file = client_config.data_dir().join(DEFAULT_JWT_FILE);
-            let mut jwt_secret_key_file = File::create(secret_file.clone())
-                .map_err(|e| format!("Error while creating jwt_secret_key file: {:?}", e))?;
-            jwt_secret_key_file
-                .write_all(jwt_secret_key.as_bytes())
-                .map_err(|e| {
-                    format!(
-                        "Error occurred while writing to jwt_secret_key file: {:?}",
-                        e
-                    )
-                })?;
-        } else {
-            return Err("Error! Please set either --execution-jwt file_path or --execution-jwt-secret-key directly via cli when using --execution-endpoint".to_string());
-        }
-
-        // Parse and set the payload builder, if any.
-        if let Some(endpoint) = cli_args.get_one::<String>("builder") {
-            let payload_builder =
-                parse_only_one_value(endpoint, SensitiveUrl::parse, "--builder", log)?;
-            el_config.builder_url = Some(payload_builder);
-
-            el_config.builder_user_agent =
-                clap_utils::parse_optional(cli_args, "builder-user-agent")?;
-
-            el_config.builder_header_timeout =
-                clap_utils::parse_optional(cli_args, "builder-header-timeout")?
-                    .map(Duration::from_millis);
-        }
-
-        if cli_args.get_flag("always-prefer-builder-payload") {
-            warn!(
-                log,
-                "Ignoring --always-prefer-builder-payload";
-                "info" => "this flag is deprecated and will be removed"
-            );
-        }
-
-        // Set config values from parse values.
-        el_config.secret_file = Some(secret_file.clone());
-        el_config.execution_endpoint = Some(execution_endpoint.clone());
-        el_config.suggested_fee_recipient =
-            clap_utils::parse_optional(cli_args, "suggested-fee-recipient")?;
-        el_config.jwt_id = clap_utils::parse_optional(cli_args, "execution-jwt-id")?;
-        el_config.jwt_version = clap_utils::parse_optional(cli_args, "execution-jwt-version")?;
-        el_config
-            .default_datadir
-            .clone_from(client_config.data_dir());
-        let execution_timeout_multiplier =
-            clap_utils::parse_required(cli_args, "execution-timeout-multiplier")?;
-        el_config.execution_timeout_multiplier = Some(execution_timeout_multiplier);
-
-        client_config.eth1.endpoint = Eth1Endpoint::Auth {
-            endpoint: execution_endpoint,
-            jwt_path: secret_file,
-            jwt_id: el_config.jwt_id.clone(),
-            jwt_version: el_config.jwt_version.clone(),
-        };
-
-        // Store the EL config in the client config.
-        client_config.execution_layer = Some(el_config);
+    // Check if the JWT secret key is passed directly via cli flag and persist it to the default
+    // file location.
+    } else if let Some(jwt_secret_key) = cli_args.get_one::<String>("execution-jwt-secret-key") {
+        use std::fs::File;
+        use std::io::Write;
+        secret_file = client_config.data_dir().join(DEFAULT_JWT_FILE);
+        let mut jwt_secret_key_file = File::create(secret_file.clone())
+            .map_err(|e| format!("Error while creating jwt_secret_key file: {:?}", e))?;
+        jwt_secret_key_file
+            .write_all(jwt_secret_key.as_bytes())
+            .map_err(|e| {
+                format!(
+                    "Error occurred while writing to jwt_secret_key file: {:?}",
+                    e
+                )
+            })?;
+    } else {
+        return Err("Error! Please set either --execution-jwt file_path or --execution-jwt-secret-key directly via cli when using --execution-endpoint".to_string());
     }
 
+    // Parse and set the payload builder, if any.
+    if let Some(endpoint) = cli_args.get_one::<String>("builder") {
+        let payload_builder =
+            parse_only_one_value(endpoint, SensitiveUrl::parse, "--builder", log)?;
+        el_config.builder_url = Some(payload_builder);
+
+        el_config.builder_user_agent = clap_utils::parse_optional(cli_args, "builder-user-agent")?;
+
+        el_config.builder_header_timeout =
+            clap_utils::parse_optional(cli_args, "builder-header-timeout")?
+                .map(Duration::from_millis);
+
+        el_config.disable_builder_ssz_requests = cli_args.get_flag("builder-disable-ssz");
+    }
+
+    // Set config values from parse values.
+    el_config.secret_file = Some(secret_file.clone());
+    el_config.execution_endpoint = Some(execution_endpoint.clone());
+    el_config.suggested_fee_recipient =
+        clap_utils::parse_optional(cli_args, "suggested-fee-recipient")?;
+    el_config.jwt_id = clap_utils::parse_optional(cli_args, "execution-jwt-id")?;
+    el_config.jwt_version = clap_utils::parse_optional(cli_args, "execution-jwt-version")?;
+    el_config
+        .default_datadir
+        .clone_from(client_config.data_dir());
+    let execution_timeout_multiplier =
+        clap_utils::parse_required(cli_args, "execution-timeout-multiplier")?;
+    el_config.execution_timeout_multiplier = Some(execution_timeout_multiplier);
+
+    client_config.eth1.endpoint = Eth1Endpoint::Auth {
+        endpoint: execution_endpoint,
+        jwt_path: secret_file,
+        jwt_id: el_config.jwt_id.clone(),
+        jwt_version: el_config.jwt_version.clone(),
+    };
+
+    // Store the EL config in the client config.
+    client_config.execution_layer = Some(el_config);
+
     // 4844 params
-    client_config.trusted_setup = context
+    if let Some(trusted_setup) = context
         .eth2_network_config
         .as_ref()
-        .and_then(|config| config.kzg_trusted_setup.as_ref())
-        .map(|trusted_setup_bytes| serde_json::from_slice(trusted_setup_bytes))
+        .map(|config| serde_json::from_slice(&config.kzg_trusted_setup))
         .transpose()
-        .map_err(|e| format!("Unable to read trusted setup file: {}", e))?;
+        .map_err(|e| format!("Unable to read trusted setup file: {}", e))?
+    {
+        client_config.trusted_setup = trusted_setup;
+    };
 
     // Override default trusted setup file if required
     if let Some(trusted_setup_file_path) = cli_args.get_one::<String>("trusted-setup-file-override")
@@ -384,7 +399,7 @@ pub fn get_config<E: EthSpec>(
             .map_err(|e| format!("Failed to open trusted setup file: {}", e))?;
         let trusted_setup: TrustedSetup = serde_json::from_reader(file)
             .map_err(|e| format!("Unable to read trusted setup file: {}", e))?;
-        client_config.trusted_setup = Some(trusted_setup);
+        client_config.trusted_setup = trusted_setup;
     }
 
     if let Some(freezer_dir) = cli_args.get_one::<String>("freezer-dir") {
@@ -394,13 +409,6 @@ pub fn get_config<E: EthSpec>(
     if let Some(blobs_db_dir) = cli_args.get_one::<String>("blobs-dir") {
         client_config.blobs_db_path = Some(PathBuf::from(blobs_db_dir));
     }
-
-    let (sprp, sprp_explicit) = get_slots_per_restore_point::<E>(clap_utils::parse_optional(
-        cli_args,
-        "slots-per-restore-point",
-    )?)?;
-    client_config.store.slots_per_restore_point = sprp;
-    client_config.store.slots_per_restore_point_set_explicitly = sprp_explicit;
 
     if let Some(block_cache_size) = cli_args.get_one::<String>("block-cache-size") {
         client_config.store.block_cache_size = block_cache_size
@@ -414,11 +422,16 @@ pub fn get_config<E: EthSpec>(
             .map_err(|_| "state-cache-size is not a valid integer".to_string())?;
     }
 
-    if let Some(historic_state_cache_size) = cli_args.get_one::<String>("historic-state-cache-size")
+    if let Some(historic_state_cache_size) =
+        clap_utils::parse_optional(cli_args, "historic-state-cache-size")?
     {
-        client_config.store.historic_state_cache_size = historic_state_cache_size
-            .parse()
-            .map_err(|_| "historic-state-cache-size is not a valid integer".to_string())?;
+        client_config.store.historic_state_cache_size = historic_state_cache_size;
+    }
+
+    if let Some(hdiff_buffer_cache_size) =
+        clap_utils::parse_optional(cli_args, "hdiff-buffer-cache-size")?
+    {
+        client_config.store.hdiff_buffer_cache_size = hdiff_buffer_cache_size;
     }
 
     client_config.store.compact_on_init = cli_args.get_flag("compact-db");
@@ -432,10 +445,28 @@ pub fn get_config<E: EthSpec>(
         client_config.store.prune_payloads = prune_payloads;
     }
 
+    if clap_utils::parse_optional::<u64>(cli_args, "slots-per-restore-point")?.is_some() {
+        warn!(log, "The slots-per-restore-point flag is deprecated");
+    }
+
+    if let Some(backend) = clap_utils::parse_optional(cli_args, "beacon-node-backend")? {
+        client_config.store.backend = backend;
+    }
+
+    if let Some(hierarchy_config) = clap_utils::parse_optional(cli_args, "hierarchy-exponents")? {
+        client_config.store.hierarchy_config = hierarchy_config;
+    }
+
     if let Some(epochs_per_migration) =
         clap_utils::parse_optional(cli_args, "epochs-per-migration")?
     {
         client_config.chain.epochs_per_migration = epochs_per_migration;
+    }
+
+    if let Some(state_cache_headroom) =
+        clap_utils::parse_optional(cli_args, "state-cache-headroom")?
+    {
+        client_config.store.state_cache_headroom = state_cache_headroom;
     }
 
     if let Some(prune_blobs) = clap_utils::parse_optional(cli_args, "prune-blobs")? {
@@ -452,6 +483,12 @@ pub fn get_config<E: EthSpec>(
         clap_utils::parse_optional(cli_args, "blob-prune-margin-epochs")?
     {
         client_config.store.blob_prune_margin_epochs = blob_prune_margin_epochs;
+    }
+
+    if let Some(malicious_withhold_count) =
+        clap_utils::parse_optional(cli_args, "malicious-withhold-count")?
+    {
+        client_config.chain.malicious_withhold_count = malicious_withhold_count;
     }
 
     /*
@@ -638,10 +675,7 @@ pub fn get_config<E: EthSpec>(
         };
     }
 
-    client_config.chain.max_network_size = lighthouse_network::gossip_max_size(
-        spec.bellatrix_fork_epoch.is_some(),
-        spec.gossip_max_size as usize,
-    );
+    client_config.chain.max_network_size = spec.max_payload_size as usize;
 
     if cli_args.get_flag("slasher") {
         let slasher_dir = if let Some(slasher_dir) = cli_args.get_one::<String>("slasher-dir") {
@@ -752,14 +786,6 @@ pub fn get_config<E: EthSpec>(
             .individual_tracking_threshold = count;
     }
 
-    if cli_args.get_flag("disable-lock-timeouts") {
-        warn!(
-            log,
-            "Ignoring --disable-lock-timeouts";
-            "info" => "this flag is deprecated and will be removed"
-        );
-    }
-
     if cli_args.get_flag("disable-proposer-reorgs") {
         client_config.chain.re_org_head_threshold = None;
         client_config.chain.re_org_parent_threshold = None;
@@ -859,14 +885,6 @@ pub fn get_config<E: EthSpec>(
         client_config.network.invalid_block_storage = Some(path);
     }
 
-    if cli_args.get_one::<String>("progressive-balances").is_some() {
-        warn!(
-            log,
-            "Progressive balances mode is deprecated";
-            "info" => "please remove --progressive-balances"
-        );
-    }
-
     if let Some(max_workers) = clap_utils::parse_optional(cli_args, "beacon-processor-max-workers")?
     {
         client_config.beacon_processor.max_workers = max_workers;
@@ -889,6 +907,40 @@ pub fn get_config<E: EthSpec>(
         .max_gossip_aggregate_batch_size =
         clap_utils::parse_required(cli_args, "beacon-processor-aggregate-batch-size")?;
 
+    if let Some(invalid_block_roots_file_path) =
+        clap_utils::parse_optional::<String>(cli_args, "invalid-block-roots")?
+    {
+        let mut file = std::fs::File::open(invalid_block_roots_file_path)
+            .map_err(|e| format!("Failed to open invalid-block-roots file: {}", e))?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .map_err(|e| format!("Failed to read invalid-block-roots file {}", e))?;
+        let invalid_block_roots: HashSet<Hash256> = contents
+            .split(',')
+            .filter_map(
+                |s| match Hash256::from_str(s.strip_prefix("0x").unwrap_or(s).trim()) {
+                    Ok(block_root) => Some(block_root),
+                    Err(e) => {
+                        warn!(
+                            log,
+                            "Unable to parse invalid block root";
+                            "block_root" => s,
+                            "error" => ?e,
+                        );
+                        None
+                    }
+                },
+            )
+            .collect();
+        client_config.chain.invalid_block_roots = invalid_block_roots;
+    } else if spec
+        .config_name
+        .as_ref()
+        .is_some_and(|network_name| network_name == "holesky")
+    {
+        client_config.chain.invalid_block_roots = HashSet::from([*INVALID_HOLESKY_BLOCK_ROOT]);
+    }
+
     Ok(client_config)
 }
 
@@ -899,12 +951,13 @@ pub fn parse_listening_addresses(
 ) -> Result<ListenAddress, String> {
     let listen_addresses_str = cli_args
         .get_many::<String>("listen-address")
-        .expect("--listen_addresses has a default value");
+        .unwrap_or_default();
     let use_zero_ports = parse_flag(cli_args, "zero-ports");
 
     // parse the possible ips
     let mut maybe_ipv4 = None;
     let mut maybe_ipv6 = None;
+
     for addr_str in listen_addresses_str {
         let addr = addr_str.parse::<IpAddr>().map_err(|parse_error| {
             format!("Failed to parse listen-address ({addr_str}) as an Ip address: {parse_error}")
@@ -914,8 +967,8 @@ pub fn parse_listening_addresses(
             IpAddr::V4(v4_addr) => match &maybe_ipv4 {
                 Some(first_ipv4_addr) => {
                     return Err(format!(
-                                "When setting the --listen-address option twice, use an IpV4 address and an Ipv6 address. \
-                                Got two IpV4 addresses {first_ipv4_addr} and {v4_addr}"
+                                "When setting the --listen-address option twice, use an IPv4 address and an IPv6 address. \
+                                Got two IPv4 addresses {first_ipv4_addr} and {v4_addr}"
                             ));
                 }
                 None => maybe_ipv4 = Some(v4_addr),
@@ -923,8 +976,8 @@ pub fn parse_listening_addresses(
             IpAddr::V6(v6_addr) => match &maybe_ipv6 {
                 Some(first_ipv6_addr) => {
                     return Err(format!(
-                                "When setting the --listen-address option twice, use an IpV4 address and an Ipv6 address. \
-                                Got two IpV6 addresses {first_ipv6_addr} and {v6_addr}"
+                                "When setting the --listen-address option twice, use an IPv4 address and an IPv6 address. \
+                                Got two IPv6 addresses {first_ipv6_addr} and {v6_addr}"
                             ));
                 }
                 None => maybe_ipv6 = Some(v6_addr),
@@ -938,12 +991,11 @@ pub fn parse_listening_addresses(
         .expect("--port has a default value")
         .parse::<u16>()
         .map_err(|parse_error| format!("Failed to parse --port as an integer: {parse_error}"))?;
-    let port6 = cli_args
+    let maybe_port6 = cli_args
         .get_one::<String>("port6")
         .map(|s| str::parse::<u16>(s))
         .transpose()
-        .map_err(|parse_error| format!("Failed to parse --port6 as an integer: {parse_error}"))?
-        .unwrap_or(9090);
+        .map_err(|parse_error| format!("Failed to parse --port6 as an integer: {parse_error}"))?;
 
     // parse the possible discovery ports.
     let maybe_disc_port = cli_args
@@ -979,17 +1031,32 @@ pub fn parse_listening_addresses(
             format!("Failed to parse --quic6-port as an integer: {parse_error}")
         })?;
 
+    // Here we specify the default listening addresses for Lighthouse.
+    // By default, we listen on 0.0.0.0.
+    //
+    // IF the host supports a globally routable IPv6 address, we also listen on ::.
+    if matches!((maybe_ipv4, maybe_ipv6), (None, None)) {
+        maybe_ipv4 = Some(Ipv4Addr::UNSPECIFIED);
+
+        if NetworkConfig::is_ipv6_supported() {
+            maybe_ipv6 = Some(Ipv6Addr::UNSPECIFIED);
+        }
+    }
+
     // Now put everything together
     let listening_addresses = match (maybe_ipv4, maybe_ipv6) {
         (None, None) => {
-            // This should never happen unless clap is broken
-            return Err("No listening addresses provided".into());
+            unreachable!("This path is handled above this match statement");
         }
         (None, Some(ipv6)) => {
             // A single ipv6 address was provided. Set the ports
             if cli_args.value_source("port6") == Some(ValueSource::CommandLine) {
                 warn!(log, "When listening only over IPv6, use the --port flag. The value of --port6 will be ignored.");
             }
+
+            // If we are only listening on ipv6 and the user has specified --port6, lets just use
+            // that.
+            let port = maybe_port6.unwrap_or(port);
 
             // use zero ports if required. If not, use the given port.
             let tcp_port = use_zero_ports
@@ -1057,6 +1124,9 @@ pub fn parse_listening_addresses(
             })
         }
         (Some(ipv4), Some(ipv6)) => {
+            // If --port6 is not set, we use --port
+            let port6 = maybe_port6.unwrap_or(port);
+
             let ipv4_tcp_port = use_zero_ports
                 .then(unused_port::unused_tcp4_port)
                 .transpose()?
@@ -1076,7 +1146,7 @@ pub fn parse_listening_addresses(
                     ipv4_tcp_port + 1
                 });
 
-            // Defaults to 9090 when required
+            // Defaults to 9000 when required
             let ipv6_tcp_port = use_zero_ports
                 .then(unused_port::unused_tcp6_port)
                 .transpose()?
@@ -1129,6 +1199,10 @@ pub fn set_network_config(
     } else {
         config.network_dir = data_dir.join(DEFAULT_NETWORK_DIR);
     };
+
+    if parse_flag(cli_args, "subscribe-all-data-column-subnets") {
+        config.subscribe_all_data_column_subnets = true;
+    }
 
     if parse_flag(cli_args, "subscribe-all-subnets") {
         config.subscribe_all_subnets = true;
@@ -1411,7 +1485,7 @@ pub fn set_network_config(
     }
 
     // Light client server config.
-    config.enable_light_client_server = parse_flag(cli_args, "light-client-server");
+    config.enable_light_client_server = !parse_flag(cli_args, "disable-light-client-server");
 
     // The self limiter is enabled by default. If the `self-limiter-protocols` flag is not provided,
     // the default params will be used.
@@ -1448,6 +1522,20 @@ pub fn set_network_config(
             Some(Default::default())
         }
     };
+
+    if let Some(idontwant_message_size_threshold) =
+        cli_args.get_one::<String>("idontwant-message-size-threshold")
+    {
+        config.idontwant_message_size_threshold = idontwant_message_size_threshold
+            .parse::<usize>()
+            .map_err(|_| {
+                format!(
+                    "Invalid idontwant message size threshold value passed: {}",
+                    idontwant_message_size_threshold
+                )
+            })?;
+    }
+
     Ok(())
 }
 
@@ -1469,23 +1557,6 @@ pub fn get_data_dir(cli_args: &ArgMatches) -> PathBuf {
             })
         })
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// Get the `slots_per_restore_point` value to use for the database.
-///
-/// Return `(sprp, set_explicitly)` where `set_explicitly` is `true` if the user provided the value.
-pub fn get_slots_per_restore_point<E: EthSpec>(
-    slots_per_restore_point: Option<u64>,
-) -> Result<(u64, bool), String> {
-    if let Some(slots_per_restore_point) = slots_per_restore_point {
-        Ok((slots_per_restore_point, true))
-    } else {
-        let default = std::cmp::min(
-            E::slots_per_historical_root() as u64,
-            store::config::DEFAULT_SLOTS_PER_RESTORE_POINT,
-        );
-        Ok((default, false))
-    }
 }
 
 /// Parses the `cli_value` as a comma-separated string of values to be parsed with `parser`.
@@ -1521,4 +1592,27 @@ where
         .into_iter()
         .next()
         .ok_or(format!("Must provide at least one value to {}", flag_name))
+}
+
+/// Remove chain, freezer and blobs db.
+fn purge_db(chain_db: PathBuf, freezer_db: PathBuf, blobs_db: PathBuf) -> Result<(), String> {
+    // Remove the chain_db.
+    if chain_db.exists() {
+        fs::remove_dir_all(chain_db)
+            .map_err(|err| format!("Failed to remove chain_db: {}", err))?;
+    }
+
+    // Remove the freezer db.
+    if freezer_db.exists() {
+        fs::remove_dir_all(freezer_db)
+            .map_err(|err| format!("Failed to remove freezer_db: {}", err))?;
+    }
+
+    // Remove the blobs db.
+    if blobs_db.exists() {
+        fs::remove_dir_all(blobs_db)
+            .map_err(|err| format!("Failed to remove blobs_db: {}", err))?;
+    }
+
+    Ok(())
 }

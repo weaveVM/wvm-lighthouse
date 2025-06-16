@@ -83,12 +83,10 @@ pub async fn handle_rpc<E: EthSpec>(
                 .ok_or_else(|| "missing/invalid params[1] value".to_string())
                 .map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
             if full_tx {
-                Ok(serde_json::to_value(
-                    ctx.execution_block_generator
-                        .read()
-                        .execution_block_with_txs_by_hash(hash),
-                )
-                .unwrap())
+                Err((
+                    "full_tx support has been removed".to_string(),
+                    BAD_PARAMS_ERROR_CODE,
+                ))
             } else {
                 Ok(serde_json::to_value(
                     ctx.execution_block_generator
@@ -101,7 +99,8 @@ pub async fn handle_rpc<E: EthSpec>(
         ENGINE_NEW_PAYLOAD_V1
         | ENGINE_NEW_PAYLOAD_V2
         | ENGINE_NEW_PAYLOAD_V3
-        | ENGINE_NEW_PAYLOAD_V4 => {
+        | ENGINE_NEW_PAYLOAD_V4
+        | ENGINE_NEW_PAYLOAD_V5 => {
             let request = match method {
                 ENGINE_NEW_PAYLOAD_V1 => JsonExecutionPayload::V1(
                     get_param::<JsonExecutionPayloadV1<E>>(params, 0)
@@ -122,6 +121,9 @@ pub async fn handle_rpc<E: EthSpec>(
                     .map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?,
                 ENGINE_NEW_PAYLOAD_V4 => get_param::<JsonExecutionPayloadV4<E>>(params, 0)
                     .map(|jep| JsonExecutionPayload::V4(jep))
+                    .map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?,
+                ENGINE_NEW_PAYLOAD_V5 => get_param::<JsonExecutionPayloadV5<E>>(params, 0)
+                    .map(|jep| JsonExecutionPayload::V5(jep))
                     .map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?,
                 _ => unreachable!(),
             };
@@ -224,6 +226,56 @@ pub async fn handle_rpc<E: EthSpec>(
                         ));
                     }
                 }
+                ForkName::Fulu => {
+                    if method == ENGINE_NEW_PAYLOAD_V1
+                        || method == ENGINE_NEW_PAYLOAD_V2
+                        || method == ENGINE_NEW_PAYLOAD_V3
+                    // TODO(fulu): Uncomment this once v5 method is ready for Fulu
+                    // || method == ENGINE_NEW_PAYLOAD_V4
+                    {
+                        return Err((
+                            format!("{} called after Fulu fork!", method),
+                            GENERIC_ERROR_CODE,
+                        ));
+                    }
+                    if matches!(request, JsonExecutionPayload::V1(_)) {
+                        return Err((
+                            format!(
+                                "{} called with `ExecutionPayloadV1` after Fulu fork!",
+                                method
+                            ),
+                            GENERIC_ERROR_CODE,
+                        ));
+                    }
+                    if matches!(request, JsonExecutionPayload::V2(_)) {
+                        return Err((
+                            format!(
+                                "{} called with `ExecutionPayloadV2` after Fulu fork!",
+                                method
+                            ),
+                            GENERIC_ERROR_CODE,
+                        ));
+                    }
+                    if matches!(request, JsonExecutionPayload::V3(_)) {
+                        return Err((
+                            format!(
+                                "{} called with `ExecutionPayloadV3` after Fulu fork!",
+                                method
+                            ),
+                            GENERIC_ERROR_CODE,
+                        ));
+                    }
+                    // TODO(fulu): remove once we switch to v5
+                    // if matches!(request, JsonExecutionPayload::V4(_)) {
+                    //     return Err((
+                    //         format!(
+                    //             "{} called with `ExecutionPayloadV4` after Fulu fork!",
+                    //             method
+                    //         ),
+                    //         GENERIC_ERROR_CODE,
+                    //     ));
+                    // }
+                }
                 _ => unreachable!(),
             };
 
@@ -262,7 +314,8 @@ pub async fn handle_rpc<E: EthSpec>(
         ENGINE_GET_PAYLOAD_V1
         | ENGINE_GET_PAYLOAD_V2
         | ENGINE_GET_PAYLOAD_V3
-        | ENGINE_GET_PAYLOAD_V4 => {
+        | ENGINE_GET_PAYLOAD_V4
+        | ENGINE_GET_PAYLOAD_V5 => {
             let request: JsonPayloadIdRequest =
                 get_param(params, 0).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
             let id = request.into();
@@ -322,6 +375,24 @@ pub async fn handle_rpc<E: EthSpec>(
                 ));
             }
 
+            // validate method called correctly according to fulu fork time
+            if ctx
+                .execution_block_generator
+                .read()
+                .get_fork_at_timestamp(response.timestamp())
+                == ForkName::Fulu
+                && (method == ENGINE_GET_PAYLOAD_V1
+                    || method == ENGINE_GET_PAYLOAD_V2
+                    || method == ENGINE_GET_PAYLOAD_V3)
+            // TODO(fulu): Uncomment this once v5 method is ready for Fulu
+            // || method == ENGINE_GET_PAYLOAD_V4)
+            {
+                return Err((
+                    format!("{} called after Fulu fork!", method),
+                    FORK_REQUEST_MISMATCH_ERROR_CODE,
+                ));
+            }
+
             match method {
                 ENGINE_GET_PAYLOAD_V1 => {
                     Ok(serde_json::to_value(JsonExecutionPayload::from(response)).unwrap())
@@ -330,14 +401,14 @@ pub async fn handle_rpc<E: EthSpec>(
                     JsonExecutionPayload::V1(execution_payload) => {
                         serde_json::to_value(JsonGetPayloadResponseV1 {
                             execution_payload,
-                            block_value: DEFAULT_MOCK_EL_PAYLOAD_VALUE_WEI.into(),
+                            block_value: Uint256::from(DEFAULT_MOCK_EL_PAYLOAD_VALUE_WEI),
                         })
                         .unwrap()
                     }
                     JsonExecutionPayload::V2(execution_payload) => {
                         serde_json::to_value(JsonGetPayloadResponseV2 {
                             execution_payload,
-                            block_value: DEFAULT_MOCK_EL_PAYLOAD_VALUE_WEI.into(),
+                            block_value: Uint256::from(DEFAULT_MOCK_EL_PAYLOAD_VALUE_WEI),
                         })
                         .unwrap()
                     }
@@ -350,7 +421,7 @@ pub async fn handle_rpc<E: EthSpec>(
                     JsonExecutionPayload::V3(execution_payload) => {
                         serde_json::to_value(JsonGetPayloadResponseV3 {
                             execution_payload,
-                            block_value: DEFAULT_MOCK_EL_PAYLOAD_VALUE_WEI.into(),
+                            block_value: Uint256::from(DEFAULT_MOCK_EL_PAYLOAD_VALUE_WEI),
                             blobs_bundle: maybe_blobs
                                 .ok_or((
                                     "No blobs returned despite V3 Payload".to_string(),
@@ -367,7 +438,7 @@ pub async fn handle_rpc<E: EthSpec>(
                     JsonExecutionPayload::V4(execution_payload) => {
                         serde_json::to_value(JsonGetPayloadResponseV4 {
                             execution_payload,
-                            block_value: DEFAULT_MOCK_EL_PAYLOAD_VALUE_WEI.into(),
+                            block_value: Uint256::from(DEFAULT_MOCK_EL_PAYLOAD_VALUE_WEI),
                             blobs_bundle: maybe_blobs
                                 .ok_or((
                                     "No blobs returned despite V4 Payload".to_string(),
@@ -375,6 +446,42 @@ pub async fn handle_rpc<E: EthSpec>(
                                 ))?
                                 .into(),
                             should_override_builder: false,
+                            // TODO(electra): add EL requests in mock el
+                            execution_requests: Default::default(),
+                        })
+                        .unwrap()
+                    }
+                    // TODO(fulu): remove this once we switch to v5 method
+                    JsonExecutionPayload::V5(execution_payload) => {
+                        serde_json::to_value(JsonGetPayloadResponseV5 {
+                            execution_payload,
+                            block_value: Uint256::from(DEFAULT_MOCK_EL_PAYLOAD_VALUE_WEI),
+                            blobs_bundle: maybe_blobs
+                                .ok_or((
+                                    "No blobs returned despite V5 Payload".to_string(),
+                                    GENERIC_ERROR_CODE,
+                                ))?
+                                .into(),
+                            should_override_builder: false,
+                            execution_requests: Default::default(),
+                        })
+                        .unwrap()
+                    }
+                    _ => unreachable!(),
+                }),
+                ENGINE_GET_PAYLOAD_V5 => Ok(match JsonExecutionPayload::from(response) {
+                    JsonExecutionPayload::V5(execution_payload) => {
+                        serde_json::to_value(JsonGetPayloadResponseV5 {
+                            execution_payload,
+                            block_value: Uint256::from(DEFAULT_MOCK_EL_PAYLOAD_VALUE_WEI),
+                            blobs_bundle: maybe_blobs
+                                .ok_or((
+                                    "No blobs returned despite V5 Payload".to_string(),
+                                    GENERIC_ERROR_CODE,
+                                ))?
+                                .into(),
+                            should_override_builder: false,
+                            execution_requests: Default::default(),
                         })
                         .unwrap()
                     }
@@ -411,7 +518,10 @@ pub async fn handle_rpc<E: EthSpec>(
                                             .map(|opt| opt.map(JsonPayloadAttributes::V1))
                                             .transpose()
                                     }
-                                    ForkName::Capella | ForkName::Deneb | ForkName::Electra => {
+                                    ForkName::Capella
+                                    | ForkName::Deneb
+                                    | ForkName::Electra
+                                    | ForkName::Fulu => {
                                         get_param::<Option<JsonPayloadAttributesV2>>(params, 1)
                                             .map(|opt| opt.map(JsonPayloadAttributes::V2))
                                             .transpose()
@@ -475,7 +585,7 @@ pub async fn handle_rpc<E: EthSpec>(
                             ));
                         }
                     }
-                    ForkName::Deneb | ForkName::Electra => {
+                    ForkName::Deneb | ForkName::Electra | ForkName::Fulu => {
                         if method == ENGINE_FORKCHOICE_UPDATED_V1 {
                             return Err((
                                 format!("{} called after Deneb fork!", method),
@@ -556,48 +666,19 @@ pub async fn handle_rpc<E: EthSpec>(
 
             let mut response = vec![];
             for block_num in start..(start + count) {
-                let maybe_block = ctx
+                let maybe_payload = ctx
                     .execution_block_generator
                     .read()
-                    .execution_block_with_txs_by_number(block_num);
+                    .execution_payload_by_number(block_num);
 
-                match maybe_block {
-                    Some(block) => {
-                        let transactions = Transactions::<E>::new(
-                            block
-                                .transactions()
-                                .iter()
-                                .map(|transaction| VariableList::new(transaction.rlp().to_vec()))
-                                .collect::<Result<_, _>>()
-                                .map_err(|e| {
-                                    (
-                                        format!("failed to deserialize transaction: {:?}", e),
-                                        GENERIC_ERROR_CODE,
-                                    )
-                                })?,
-                        )
-                        .map_err(|e| {
-                            (
-                                format!("failed to deserialize transactions: {:?}", e),
-                                GENERIC_ERROR_CODE,
-                            )
-                        })?;
-
-                        response.push(Some(JsonExecutionPayloadBodyV1::<E> {
-                            transactions,
-                            withdrawals: block
-                                .withdrawals()
-                                .ok()
-                                .map(|withdrawals| VariableList::from(withdrawals.clone())),
-                            deposit_requests: block.deposit_requests().ok().map(
-                                |deposit_requests| VariableList::from(deposit_requests.clone()),
-                            ),
-                            withdrawal_requests: block.withdrawal_requests().ok().map(
-                                |withdrawal_requests| {
-                                    VariableList::from(withdrawal_requests.clone())
-                                },
-                            ),
-                        }));
+                match maybe_payload {
+                    Some(payload) => {
+                        let payload_body: ExecutionPayloadBodyV1<E> = ExecutionPayloadBodyV1 {
+                            transactions: payload.transactions().clone(),
+                            withdrawals: payload.withdrawals().ok().cloned(),
+                        };
+                        let json_payload_body = JsonExecutionPayloadBodyV1::from(payload_body);
+                        response.push(Some(json_payload_body));
                     }
                     None => response.push(None),
                 }

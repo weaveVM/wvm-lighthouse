@@ -138,7 +138,7 @@ impl ShufflingCache {
             .get(&key)
             // Replace the committee if it's not present or if it's a promise. A bird in the hand is
             // worth two in the promise-bush!
-            .map_or(true, CacheItem::is_promise)
+            .is_none_or(CacheItem::is_promise)
         {
             self.insert_cache_item(
                 key,
@@ -253,7 +253,7 @@ impl BlockShufflingIds {
         } else if self
             .previous
             .as_ref()
-            .map_or(false, |id| id.shuffling_epoch == epoch)
+            .is_some_and(|id| id.shuffling_epoch == epoch)
         {
             self.previous.clone()
         } else if epoch == self.next.shuffling_epoch {
@@ -294,7 +294,7 @@ impl BlockShufflingIds {
 #[cfg(not(debug_assertions))]
 #[cfg(test)]
 mod test {
-    use task_executor::test_utils::null_logger;
+    use task_executor::test_utils::test_logger;
     use types::*;
 
     use crate::test_utils::EphemeralHarnessType;
@@ -315,7 +315,7 @@ mod test {
             previous: Some(shuffling_id(current_epoch - 1)),
             block_root: Hash256::from_low_u64_le(0),
         };
-        let logger = null_logger().unwrap();
+        let logger = test_logger();
         ShufflingCache::new(TEST_CACHE_SIZE, head_shuffling_ids, logger)
     }
 
@@ -512,7 +512,7 @@ mod test {
         }
 
         assert!(
-            !cache.contains(&shuffling_id_and_committee_caches.get(0).unwrap().0),
+            !cache.contains(&shuffling_id_and_committee_caches.first().unwrap().0),
             "should not contain oldest epoch shuffling id"
         );
         assert_eq!(

@@ -7,18 +7,17 @@ use crate::Client;
 use beacon_chain::attestation_simulator::start_attestation_simulator_service;
 use beacon_chain::data_availability_checker::start_availability_cache_maintenance_service;
 use beacon_chain::graffiti_calculator::start_engine_version_cache_refresh_service;
-use beacon_chain::otb_verification_service::start_otb_verification_service;
 use beacon_chain::proposer_prep_service::start_proposer_prep_service;
 use beacon_chain::schema_change::migrate_schema;
-use beacon_chain::LightClientProducerEvent;
 use beacon_chain::{
     builder::{BeaconChainBuilder, Witness},
     eth1_chain::{CachingEth1Backend, Eth1Chain},
     slot_clock::{SlotClock, SystemTimeSlotClock},
     state_advance_timer::spawn_state_advance_timer,
-    store::{HotColdDB, ItemStore, LevelDB, StoreConfig},
+    store::{HotColdDB, ItemStore, StoreConfig},
     BeaconChain, BeaconChainTypes, Eth1ChainBackend, MigratorConfig, ServerSentEventHandler,
 };
+use beacon_chain::{Kzg, LightClientProducerEvent};
 use beacon_processor::{BeaconProcessor, BeaconProcessorChannels};
 use beacon_processor::{BeaconProcessorConfig, BeaconProcessorQueueLengths};
 use environment::RuntimeContext;
@@ -37,12 +36,12 @@ use network::{NetworkConfig, NetworkSenders, NetworkService};
 use slasher::Slasher;
 use slasher_service::SlasherService;
 use slog::{debug, info, warn, Logger};
-use ssz::Decode;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use store::database::interface::BeaconNodeBackend;
 use timer::spawn_timer;
 use tokio::sync::oneshot;
 use types::{
@@ -76,7 +75,7 @@ pub struct ClientBuilder<T: BeaconChainTypes> {
     #[allow(clippy::type_complexity)]
     store: Option<Arc<HotColdDB<T::EthSpec, T::HotStore, T::ColdStore>>>,
     runtime_context: Option<RuntimeContext<T::EthSpec>>,
-    chain_spec: Option<ChainSpec>,
+    chain_spec: Option<Arc<ChainSpec>>,
     beacon_chain_builder: Option<BeaconChainBuilder<T>>,
     beacon_chain: Option<Arc<BeaconChain<T>>>,
     eth1_service: Option<Eth1Service>,
@@ -137,7 +136,7 @@ where
     }
 
     /// Specifies the `ChainSpec`.
-    pub fn chain_spec(mut self, spec: ChainSpec) -> Self {
+    pub fn chain_spec(mut self, spec: Arc<ChainSpec>) -> Self {
         self.chain_spec = Some(spec);
         self
     }
@@ -195,7 +194,17 @@ where
             None
         };
 
-        let builder = BeaconChainBuilder::new(eth_spec_instance)
+        let kzg_err_msg = |e| format!("Failed to load trusted setup: {:?}", e);
+        let trusted_setup = config.trusted_setup.clone();
+        let kzg = if spec.is_peer_das_scheduled() {
+            Kzg::new_from_trusted_setup_das_enabled(trusted_setup).map_err(kzg_err_msg)?
+        } else if spec.deneb_fork_epoch.is_some() {
+            Kzg::new_from_trusted_setup(trusted_setup).map_err(kzg_err_msg)?
+        } else {
+            Kzg::new_from_trusted_setup_no_precomp(trusted_setup).map_err(kzg_err_msg)?
+        };
+
+        let builder = BeaconChainBuilder::new(eth_spec_instance, Arc::new(kzg))
             .logger(context.log().clone())
             .store(store)
             .task_executor(context.executor.clone())
@@ -207,6 +216,7 @@ where
             .beacon_graffiti(beacon_graffiti)
             .event_handler(event_handler)
             .execution_layer(execution_layer)
+            .import_all_data_columns(config.network.subscribe_all_data_column_subnets)
             .validator_monitor_config(config.validator_monitor.clone());
 
         let builder = if let Some(slasher) = self.slasher.clone() {
@@ -351,10 +361,11 @@ where
                 let anchor_block = SignedBeaconBlock::from_ssz_bytes(&anchor_block_bytes, &spec)
                     .map_err(|e| format!("Unable to parse weak subj block SSZ: {:?}", e))?;
                 let anchor_blobs = if anchor_block.message().body().has_blobs() {
+                    let max_blobs_len = spec.max_blobs_per_block(anchor_block.epoch()) as usize;
                     let anchor_blobs_bytes = anchor_blobs_bytes
                         .ok_or("Blobs for checkpoint must be provided using --checkpoint-blobs")?;
                     Some(
-                        BlobSidecarList::from_ssz_bytes(&anchor_blobs_bytes)
+                        BlobSidecarList::from_ssz_bytes(&anchor_blobs_bytes, max_blobs_len)
                             .map_err(|e| format!("Unable to parse weak subj blobs SSZ: {e:?}"))?,
                     )
                 } else {
@@ -504,7 +515,7 @@ where
                     deposit_snapshot.and_then(|snapshot| match Eth1Service::from_deposit_snapshot(
                         config.eth1,
                         context.log().clone(),
-                        spec,
+                        spec.clone(),
                         &snapshot,
                     ) {
                         Ok(service) => {
@@ -593,10 +604,9 @@ where
                 };
 
                 let genesis_state = genesis_service
-                    .wait_for_genesis_state(
-                        Duration::from_millis(ETH1_GENESIS_UPDATE_INTERVAL_MILLIS),
-                        context.eth2_config().spec.clone(),
-                    )
+                    .wait_for_genesis_state(Duration::from_millis(
+                        ETH1_GENESIS_UPDATE_INTERVAL_MILLIS,
+                    ))
                     .await?;
 
                 let _ = exit_tx.send(());
@@ -622,17 +632,6 @@ where
             ClientGenesis::FromStore => builder.resume_from_db().map(|v| (v, None))?,
         };
 
-        let beacon_chain_builder = if let Some(trusted_setup) = config.trusted_setup {
-            let kzg = trusted_setup
-                .try_into()
-                .map(Arc::new)
-                .map(Some)
-                .map_err(|e| format!("Failed to load trusted setup: {:?}", e))?;
-            beacon_chain_builder.kzg(kzg)
-        } else {
-            beacon_chain_builder
-        };
-
         if config.sync_eth1_chain {
             self.eth1_service = eth1_service_option;
         }
@@ -641,7 +640,7 @@ where
     }
 
     /// Starts the networking stack.
-    pub async fn network(mut self, config: &NetworkConfig) -> Result<Self, String> {
+    pub async fn network(mut self, config: Arc<NetworkConfig>) -> Result<Self, String> {
         let beacon_chain = self
             .beacon_chain
             .clone()
@@ -912,7 +911,7 @@ where
                         .forkchoice_update_parameters();
                     if params
                         .head_hash
-                        .map_or(false, |hash| hash != ExecutionBlockHash::zero())
+                        .is_some_and(|hash| hash != ExecutionBlockHash::zero())
                     {
                         // Spawn a new task to update the EE without waiting for it to complete.
                         let inner_chain = beacon_chain.clone();
@@ -971,7 +970,6 @@ where
             }
 
             start_proposer_prep_service(runtime_context.executor.clone(), beacon_chain.clone());
-            start_otb_verification_service(runtime_context.executor.clone(), beacon_chain.clone());
             start_availability_cache_maintenance_service(
                 runtime_context.executor.clone(),
                 beacon_chain.clone(),
@@ -1033,7 +1031,7 @@ where
 }
 
 impl<TSlotClock, TEth1Backend, E>
-    ClientBuilder<Witness<TSlotClock, TEth1Backend, E, LevelDB<E>, LevelDB<E>>>
+    ClientBuilder<Witness<TSlotClock, TEth1Backend, E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>>
 where
     TSlotClock: SlotClock + 'static,
     TEth1Backend: Eth1ChainBackend<E> + 'static,
@@ -1061,21 +1059,21 @@ where
         self.db_path = Some(hot_path.into());
         self.freezer_db_path = Some(cold_path.into());
 
-        let inner_spec = spec.clone();
-        let deposit_contract_deploy_block = context
+        // Optionally grab the genesis state root.
+        // This will only be required if a DB upgrade to V22 is needed.
+        let genesis_state_root = context
             .eth2_network_config
             .as_ref()
-            .map(|config| config.deposit_contract_deploy_block)
-            .unwrap_or(0);
+            .and_then(|config| config.genesis_state_root::<E>().transpose())
+            .transpose()?;
 
         let schema_upgrade = |db, from, to| {
             migrate_schema::<Witness<TSlotClock, TEth1Backend, _, _, _>>(
                 db,
-                deposit_contract_deploy_block,
+                genesis_state_root,
                 from,
                 to,
                 log,
-                &inner_spec,
             )
         };
 

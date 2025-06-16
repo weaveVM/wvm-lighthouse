@@ -1,12 +1,10 @@
 #![cfg(not(debug_assertions))]
 
 use beacon_chain::attestation_simulator::produce_unaggregated_attestation;
-use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::test_utils::{AttestationStrategy, BeaconChainHarness, BlockStrategy};
 use beacon_chain::validator_monitor::UNAGGREGATED_ATTESTATION_LAG_SLOTS;
 use beacon_chain::{metrics, StateSkipConfig, WhenSlotSkipped};
-use lazy_static::lazy_static;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tree_hash::TreeHash;
 use types::{
     AggregateSignature, Attestation, EthSpec, Keypair, MainnetEthSpec, RelativeEpoch, Slot,
@@ -14,10 +12,9 @@ use types::{
 
 pub const VALIDATOR_COUNT: usize = 16;
 
-lazy_static! {
-    /// A cached set of keys.
-    static ref KEYPAIRS: Vec<Keypair> = types::test_utils::generate_deterministic_keypairs(VALIDATOR_COUNT);
-}
+/// A cached set of keys.
+static KEYPAIRS: LazyLock<Vec<Keypair>> =
+    LazyLock::new(|| types::test_utils::generate_deterministic_keypairs(VALIDATOR_COUNT));
 
 /// This test builds a chain that is testing the performance of the unaggregated attestations
 /// produced by the attestation simulator service.
@@ -72,12 +69,12 @@ async fn produces_attestations_from_attestation_simulator_service() {
     }
 
     // Compare the prometheus metrics that evaluates the performance of the unaggregated attestations
-    let hit_prometheus_metrics = vec![
+    let hit_prometheus_metrics = [
         metrics::VALIDATOR_MONITOR_ATTESTATION_SIMULATOR_HEAD_ATTESTER_HIT_TOTAL,
         metrics::VALIDATOR_MONITOR_ATTESTATION_SIMULATOR_TARGET_ATTESTER_HIT_TOTAL,
         metrics::VALIDATOR_MONITOR_ATTESTATION_SIMULATOR_SOURCE_ATTESTER_HIT_TOTAL,
     ];
-    let miss_prometheus_metrics = vec![
+    let miss_prometheus_metrics = [
         metrics::VALIDATOR_MONITOR_ATTESTATION_SIMULATOR_HEAD_ATTESTER_MISS_TOTAL,
         metrics::VALIDATOR_MONITOR_ATTESTATION_SIMULATOR_TARGET_ATTESTER_MISS_TOTAL,
         metrics::VALIDATOR_MONITOR_ATTESTATION_SIMULATOR_SOURCE_ATTESTER_MISS_TOTAL,
@@ -88,7 +85,7 @@ async fn produces_attestations_from_attestation_simulator_service() {
     let expected_miss_metrics_count = 0;
     let expected_hit_metrics_count =
         num_blocks_produced - UNAGGREGATED_ATTESTATION_LAG_SLOTS as u64;
-    lighthouse_metrics::gather().iter().for_each(|mf| {
+    metrics::gather().iter().for_each(|mf| {
         if hit_prometheus_metrics.contains(&mf.get_name()) {
             assert_eq!(
                 mf.get_metric()[0].get_counter().get_value() as u64,
@@ -157,7 +154,6 @@ async fn produces_attestations() {
             .store
             .make_full_block(&block_root, blinded_block)
             .unwrap();
-        let blobs = chain.get_blobs(&block_root).unwrap();
 
         let epoch_boundary_slot = state
             .current_epoch()
@@ -225,8 +221,7 @@ async fn produces_attestations() {
             assert_eq!(data.target.root, target_root, "bad target root");
 
             let rpc_block =
-                RpcBlock::<MainnetEthSpec>::new(None, Arc::new(block.clone()), Some(blobs.clone()))
-                    .unwrap();
+                harness.build_rpc_block_from_store_blobs(Some(block_root), Arc::new(block.clone()));
             let beacon_chain::data_availability_checker::MaybeAvailableBlock::Available(
                 available_block,
             ) = chain
@@ -298,13 +293,8 @@ async fn early_attester_cache_old_request() {
         .get_block(&head.beacon_block_root)
         .unwrap();
 
-    let head_blobs = harness
-        .chain
-        .get_blobs(&head.beacon_block_root)
-        .expect("should get blobs");
-
-    let rpc_block =
-        RpcBlock::<MainnetEthSpec>::new(None, head.beacon_block.clone(), Some(head_blobs)).unwrap();
+    let rpc_block = harness
+        .build_rpc_block_from_store_blobs(Some(head.beacon_block_root), head.beacon_block.clone());
     let beacon_chain::data_availability_checker::MaybeAvailableBlock::Available(available_block) =
         harness
             .chain

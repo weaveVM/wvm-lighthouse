@@ -18,16 +18,16 @@ Options:
           certificate path.
       --broadcast <API_TOPICS>
           Comma-separated list of beacon API topics to broadcast to all beacon
-          nodes. Possible values are: none, attestations, blocks, subscriptions,
-          sync-committee. Default (when flag is omitted) is to broadcast
-          subscriptions only.
+          nodes. Default (when flag is omitted) is to broadcast subscriptions
+          only. [possible values: none, attestations, blocks, subscriptions,
+          sync-committee]
       --builder-boost-factor <UINT64>
           Defines the boost factor, a percentage multiplier to apply to the
           builder's payload value when choosing between a builder payload header
           and payload from the local execution node.
-      --builder-registration-timestamp-override <builder-registration-timestamp-override>
+      --builder-registration-timestamp-override <UNIX-TIMESTAMP>
           This flag takes a unix timestamp value that will be used to override
-          the timestamp used in the builder api registration
+          the timestamp used in the builder api registration.
   -d, --datadir <DIR>
           Used to specify a custom root data directory for lighthouse keys and
           databases. Defaults to $HOME/.lighthouse/{network} where network is
@@ -41,7 +41,7 @@ Options:
           The gas limit to be used in all builder proposals for all validators
           managed by this validator client. Note this will not necessarily be
           used if the gas limit set here moves too far from the previous block's
-          gas limit. [default: 30,000,000]
+          gas limit. [default: 30000000]
       --genesis-state-url <URL>
           A URL of a beacon-API compatible server from which to download the
           genesis state. Checkpoint sync server URLs can generally be used with
@@ -68,7 +68,12 @@ Options:
           is supplied, the CORS allowed origin is set to the listen address of
           this server (e.g., http://localhost:5062).
       --http-port <PORT>
-          Set the listen TCP port for the RESTful HTTP API server.
+          Set the listen TCP port for the RESTful HTTP API server. [default:
+          5062]
+      --http-token-path <HTTP_TOKEN_PATH>
+          Path to file containing the HTTP API token for validator client
+          authentication. If not specified, defaults to
+          {validators-dir}/api-token.txt.
       --log-format <FORMAT>
           Specifies the log format used when emitting logs to the terminal.
           [possible values: JSON]
@@ -92,6 +97,7 @@ Options:
           set to 0, background file logging is disabled. [default: 200]
       --metrics-address <ADDRESS>
           Set the listen address for the Prometheus metrics HTTP server.
+          [default: 127.0.0.1]
       --metrics-allow-origin <ORIGIN>
           Set the value of the Access-Control-Allow-Origin response HTTP header.
           Use * to allow any origin (not recommended in production). If no value
@@ -99,6 +105,7 @@ Options:
           this server (e.g., http://localhost:5064).
       --metrics-port <PORT>
           Set the listen TCP port for the Prometheus metrics HTTP server.
+          [default: 5064]
       --monitoring-endpoint <ADDRESS>
           Enables the monitoring service for sending system metrics to a remote
           endpoint. This can be used to monitor your setup on certain services
@@ -109,23 +116,15 @@ Options:
           provide an untrusted URL.
       --monitoring-endpoint-period <SECONDS>
           Defines how many seconds to wait between each message sent to the
-          monitoring-endpoint. Default: 60s
+          monitoring-endpoint. [default: 60]
       --network <network>
           Name of the Eth2 chain Lighthouse will sync and follow. [possible
-          values: mainnet, gnosis, chiado, sepolia, holesky]
+          values: mainnet, gnosis, chiado, sepolia, holesky, hoodi]
       --proposer-nodes <NETWORK_ADDRESSES>
           Comma-separated addresses to one or more beacon node HTTP APIs. These
           specify nodes that are used to send beacon block proposals. A failure
           will revert back to the standard beacon nodes specified in
           --beacon-nodes.
-      --safe-slots-to-import-optimistically <INTEGER>
-          Used to coordinate manual overrides of the
-          SAFE_SLOTS_TO_IMPORT_OPTIMISTICALLY parameter. This flag should only
-          be used if the user has a clear understanding that the broad Ethereum
-          community has elected to override this parameter in the event of an
-          attack at the PoS transition block. Incorrect use of this flag can
-          cause your node to possibly accept an invalid chain or sync more
-          slowly. Be extremely careful with this flag.
       --secrets-dir <SECRETS_DIRECTORY>
           The directory which contains the password to unlock the validator
           voting keypairs. Each password should be contained in a file where the
@@ -140,27 +139,6 @@ Options:
           Path to directory containing eth2_testnet specs. Defaults to a
           hard-coded Lighthouse testnet. Only effective if there is no existing
           database.
-      --terminal-block-hash-epoch-override <EPOCH>
-          Used to coordinate manual overrides to the
-          TERMINAL_BLOCK_HASH_ACTIVATION_EPOCH parameter. This flag should only
-          be used if the user has a clear understanding that the broad Ethereum
-          community has elected to override the terminal PoW block. Incorrect
-          use of this flag will cause your node to experience a consensus
-          failure. Be extremely careful with this flag.
-      --terminal-block-hash-override <TERMINAL_BLOCK_HASH>
-          Used to coordinate manual overrides to the TERMINAL_BLOCK_HASH
-          parameter. This flag should only be used if the user has a clear
-          understanding that the broad Ethereum community has elected to
-          override the terminal PoW block. Incorrect use of this flag will cause
-          your node to experience a consensus failure. Be extremely careful with
-          this flag.
-      --terminal-total-difficulty-override <INTEGER>
-          Used to coordinate manual overrides to the TERMINAL_TOTAL_DIFFICULTY
-          parameter. Accepts a 256-bit decimal integer (not a hex value). This
-          flag should only be used if the user has a clear understanding that
-          the broad Ethereum community has elected to override the terminal
-          difficulty. Incorrect use of this flag will cause your node to
-          experience a consensus failure. Be extremely careful with this flag.
       --validator-registration-batch-size <INTEGER>
           Defines the number of validators per validator/register_validator
           request sent to the BN. This value can be reduced to avoid timeouts
@@ -170,17 +148,37 @@ Options:
           each validator along with the common slashing protection database and
           the validator_definitions.yml
       --web3-signer-keep-alive-timeout <MILLIS>
-          Keep-alive timeout for each web3signer connection. Set to 'null' to
-          never timeout [default: 20000]
+          Keep-alive timeout for each web3signer connection. Set to '0' to never
+          timeout. [default: 20000]
       --web3-signer-max-idle-connections <COUNT>
           Maximum number of idle connections to maintain per web3signer host.
           Default is unlimited.
 
 Flags:
+      --beacon-nodes-sync-tolerances <SYNC_TOLERANCES>
+          A comma-separated list of 3 values which sets the size of each sync
+          distance range when determining the health of each connected beacon
+          node. The first value determines the `Synced` range. If a connected
+          beacon node is synced to within this number of slots it is considered
+          'Synced'. The second value determines the `Small` sync distance range.
+          This range starts immediately after the `Synced` range. The third
+          value determines the `Medium` sync distance range. This range starts
+          immediately after the `Small` range. Any sync distance value beyond
+          that is considered `Large`. For example, a value of `8,8,48` would
+          have ranges like the following: `Synced`: 0..=8 `Small`: 9..=16
+          `Medium`: 17..=64 `Large`: 65.. These values are used to determine
+          what ordering beacon node fallbacks are used in. Generally, `Synced`
+          nodes are preferred over `Small` and so on. Nodes in the `Synced`
+          range will tie-break based on their ordering in `--beacon-nodes`. This
+          ensures the primary beacon node is prioritised. [default: 8,8,48]
       --builder-proposals
           If this flag is set, Lighthouse will query the Beacon Node for only
           block headers during proposals and will sign over headers. Useful for
           outsourcing execution payload construction during proposals.
+      --disable-attesting
+          Disable the performance of attestation duties (and sync committee
+          duties). This flag should only be used in emergencies to prioritise
+          block proposal duties.
       --disable-auto-discover
           If present, do not attempt to discover new validators in the
           validators-dir. Validators will need to be manually added to the
@@ -194,12 +192,6 @@ Flags:
           If present, do not configure the system allocator. Providing this flag
           will generally increase memory usage, it should only be provided when
           debugging specific memory allocation issues.
-      --disable-run-on-all
-          DEPRECATED. Use --broadcast. By default, Lighthouse publishes
-          attestation, sync committee subscriptions and proposer preparation
-          messages to all beacon nodes provided in the `--beacon-nodes flag`.
-          This option changes that behaviour such that these api calls only go
-          out to the first available and synced beacon node
       --disable-slashing-protection-web3signer
           Disable Lighthouse's slashing protection for all web3signer keys. This
           can reduce the I/O burden on the VC but is only safe if slashing
@@ -259,13 +251,20 @@ Flags:
           contain sensitive information about your validator and so this flag
           should be used with caution. For Windows users, the log file
           permissions will be inherited from the parent folder.
+      --long-timeouts-multiplier <LONG_TIMEOUTS_MULTIPLIER>
+          If present, the validator client will use a multiplier for the timeout
+          when making requests to the beacon node. This only takes effect when
+          the `--use-long-timeouts` flag is present. The timeouts will be the
+          slot duration multiplied by this value. This flag is generally not
+          recommended, longer timeouts can cause missed duties when fallbacks
+          are used. [default: 1]
       --metrics
           Enable the Prometheus metrics HTTP server. Disabled by default.
       --prefer-builder-proposals
           If this flag is set, Lighthouse will always prefer blocks constructed
           by builders, regardless of payload value.
-      --produce-block-v3
-          This flag is deprecated and is no longer in use.
+      --stdin-inputs
+          If present, read all user inputs from stdin instead of tty.
       --unencrypted-http-transport
           This is a safety flag to ensure that the user is aware that the http
           transport is unencrypted and using a custom HTTP address is unsafe.

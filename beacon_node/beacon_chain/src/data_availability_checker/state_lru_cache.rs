@@ -57,6 +57,11 @@ impl<E: EthSpec> DietAvailabilityPendingExecutedBlock<E> {
             .cloned()
             .unwrap_or_default()
     }
+
+    /// Returns the epoch corresponding to `self.slot()`.
+    pub fn epoch(&self) -> Epoch {
+        self.block.slot().epoch(E::slots_per_epoch())
+    }
 }
 
 /// This LRU cache holds BeaconStates used for block import. If the cache overflows,
@@ -70,11 +75,11 @@ impl<E: EthSpec> DietAvailabilityPendingExecutedBlock<E> {
 pub struct StateLRUCache<T: BeaconChainTypes> {
     states: RwLock<LruCache<Hash256, BeaconState<T::EthSpec>>>,
     store: BeaconStore<T>,
-    spec: ChainSpec,
+    spec: Arc<ChainSpec>,
 }
 
 impl<T: BeaconChainTypes> StateLRUCache<T> {
-    pub fn new(store: BeaconStore<T>, spec: ChainSpec) -> Self {
+    pub fn new(store: BeaconStore<T>, spec: Arc<ChainSpec>) -> Self {
         Self {
             states: RwLock::new(LruCache::new(STATE_LRU_CAPACITY_NON_ZERO)),
             store,
@@ -131,6 +136,7 @@ impl<T: BeaconChainTypes> StateLRUCache<T> {
                 consensus_context: diet_executed_block
                     .consensus_context
                     .into_consensus_context(),
+                data_column_recv: None,
             },
             payload_verification_outcome: diet_executed_block.payload_verification_outcome,
         })

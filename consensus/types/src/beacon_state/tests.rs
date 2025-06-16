@@ -3,21 +3,20 @@ use crate::test_utils::*;
 use beacon_chain::test_utils::{BeaconChainHarness, EphemeralHarnessType};
 use beacon_chain::types::{
     test_utils::TestRandom, BeaconState, BeaconStateAltair, BeaconStateBase, BeaconStateError,
-    ChainSpec, Domain, Epoch, EthSpec, Hash256, Keypair, MainnetEthSpec, MinimalEthSpec,
-    RelativeEpoch, Slot, Vector,
+    ChainSpec, Domain, Epoch, EthSpec, FixedBytesExtended, Hash256, Keypair, MainnetEthSpec,
+    MinimalEthSpec, RelativeEpoch, Slot, Vector,
 };
-use lazy_static::lazy_static;
 use ssz::Encode;
 use std::ops::Mul;
+use std::sync::LazyLock;
 use swap_or_not_shuffle::compute_shuffled_index;
 
 pub const MAX_VALIDATOR_COUNT: usize = 129;
 pub const SLOT_OFFSET: Slot = Slot::new(1);
 
-lazy_static! {
-    /// A cached set of keys.
-    static ref KEYPAIRS: Vec<Keypair> = generate_deterministic_keypairs(MAX_VALIDATOR_COUNT);
-}
+/// A cached set of keys.
+static KEYPAIRS: LazyLock<Vec<Keypair>> =
+    LazyLock::new(|| generate_deterministic_keypairs(MAX_VALIDATOR_COUNT));
 
 async fn get_harness<E: EthSpec>(
     validator_count: usize,
@@ -305,43 +304,6 @@ mod committees {
     #[tokio::test]
     async fn next_epoch_committee_consistency() {
         committee_consistency_test_suite::<MinimalEthSpec>(RelativeEpoch::Next).await;
-    }
-}
-
-mod get_outstanding_deposit_len {
-    use super::*;
-
-    async fn state() -> BeaconState<MinimalEthSpec> {
-        get_harness(16, Slot::new(0))
-            .await
-            .chain
-            .head_beacon_state_cloned()
-    }
-
-    #[tokio::test]
-    async fn returns_ok() {
-        let mut state = state().await;
-        assert_eq!(state.get_outstanding_deposit_len(), Ok(0));
-
-        state.eth1_data_mut().deposit_count = 17;
-        *state.eth1_deposit_index_mut() = 16;
-        assert_eq!(state.get_outstanding_deposit_len(), Ok(1));
-    }
-
-    #[tokio::test]
-    async fn returns_err_if_the_state_is_invalid() {
-        let mut state = state().await;
-        // The state is invalid, deposit count is lower than deposit index.
-        state.eth1_data_mut().deposit_count = 16;
-        *state.eth1_deposit_index_mut() = 17;
-
-        assert_eq!(
-            state.get_outstanding_deposit_len(),
-            Err(BeaconStateError::InvalidDepositState {
-                deposit_count: 16,
-                deposit_index: 17,
-            })
-        );
     }
 }
 

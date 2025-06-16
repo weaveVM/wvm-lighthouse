@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::hash::Hash;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::time::Interval;
-use types::EthSpec;
+use types::{ChainSpec, EthSpec, ForkContext, ForkName};
 
 /// Nanoseconds since a given time.
 // Maintained as u64 to reduce footprint
@@ -97,12 +98,19 @@ pub struct RPCRateLimiter {
     blbrange_rl: Limiter<PeerId>,
     /// BlobsByRoot rate limiter.
     blbroot_rl: Limiter<PeerId>,
+    /// DataColumnssByRoot rate limiter.
+    dcbroot_rl: Limiter<PeerId>,
+    /// DataColumnsByRange rate limiter.
+    dcbrange_rl: Limiter<PeerId>,
     /// LightClientBootstrap rate limiter.
     lc_bootstrap_rl: Limiter<PeerId>,
     /// LightClientOptimisticUpdate rate limiter.
     lc_optimistic_update_rl: Limiter<PeerId>,
     /// LightClientFinalityUpdate rate limiter.
     lc_finality_update_rl: Limiter<PeerId>,
+    /// LightClientUpdatesByRange rate limiter.
+    lc_updates_by_range_rl: Limiter<PeerId>,
+    fork_context: Arc<ForkContext>,
 }
 
 /// Error type for non conformant requests
@@ -133,12 +141,18 @@ pub struct RPCRateLimiterBuilder {
     blbrange_quota: Option<Quota>,
     /// Quota for the BlobsByRoot protocol.
     blbroot_quota: Option<Quota>,
+    /// Quota for the DataColumnsByRoot protocol.
+    dcbroot_quota: Option<Quota>,
+    /// Quota for the DataColumnsByRange protocol.
+    dcbrange_quota: Option<Quota>,
     /// Quota for the LightClientBootstrap protocol.
     lcbootstrap_quota: Option<Quota>,
     /// Quota for the LightClientOptimisticUpdate protocol.
     lc_optimistic_update_quota: Option<Quota>,
     /// Quota for the LightClientOptimisticUpdate protocol.
     lc_finality_update_quota: Option<Quota>,
+    /// Quota for the LightClientUpdatesByRange protocol.
+    lc_updates_by_range_quota: Option<Quota>,
 }
 
 impl RPCRateLimiterBuilder {
@@ -154,14 +168,17 @@ impl RPCRateLimiterBuilder {
             Protocol::BlocksByRoot => self.bbroots_quota = q,
             Protocol::BlobsByRange => self.blbrange_quota = q,
             Protocol::BlobsByRoot => self.blbroot_quota = q,
+            Protocol::DataColumnsByRoot => self.dcbroot_quota = q,
+            Protocol::DataColumnsByRange => self.dcbrange_quota = q,
             Protocol::LightClientBootstrap => self.lcbootstrap_quota = q,
             Protocol::LightClientOptimisticUpdate => self.lc_optimistic_update_quota = q,
             Protocol::LightClientFinalityUpdate => self.lc_finality_update_quota = q,
+            Protocol::LightClientUpdatesByRange => self.lc_updates_by_range_quota = q,
         }
         self
     }
 
-    pub fn build(self) -> Result<RPCRateLimiter, &'static str> {
+    pub fn build(self, fork_context: Arc<ForkContext>) -> Result<RPCRateLimiter, &'static str> {
         // get our quotas
         let ping_quota = self.ping_quota.ok_or("Ping quota not specified")?;
         let metadata_quota = self.metadata_quota.ok_or("MetaData quota not specified")?;
@@ -182,14 +199,24 @@ impl RPCRateLimiterBuilder {
         let lc_finality_update_quota = self
             .lc_finality_update_quota
             .ok_or("LightClientFinalityUpdate quota not specified")?;
+        let lc_updates_by_range_quota = self
+            .lc_updates_by_range_quota
+            .ok_or("LightClientUpdatesByRange quota not specified")?;
 
         let blbrange_quota = self
             .blbrange_quota
             .ok_or("BlobsByRange quota not specified")?;
-
         let blbroots_quota = self
             .blbroot_quota
             .ok_or("BlobsByRoot quota not specified")?;
+
+        let dcbroot_quota = self
+            .dcbroot_quota
+            .ok_or("DataColumnsByRoot quota not specified")?;
+
+        let dcbrange_quota = self
+            .dcbrange_quota
+            .ok_or("DataColumnsByRange quota not specified")?;
 
         // create the rate limiters
         let ping_rl = Limiter::from_quota(ping_quota)?;
@@ -200,9 +227,12 @@ impl RPCRateLimiterBuilder {
         let bbrange_rl = Limiter::from_quota(bbrange_quota)?;
         let blbrange_rl = Limiter::from_quota(blbrange_quota)?;
         let blbroot_rl = Limiter::from_quota(blbroots_quota)?;
+        let dcbroot_rl = Limiter::from_quota(dcbroot_quota)?;
+        let dcbrange_rl = Limiter::from_quota(dcbrange_quota)?;
         let lc_bootstrap_rl = Limiter::from_quota(lc_bootstrap_quota)?;
         let lc_optimistic_update_rl = Limiter::from_quota(lc_optimistic_update_quota)?;
         let lc_finality_update_rl = Limiter::from_quota(lc_finality_update_quota)?;
+        let lc_updates_by_range_rl = Limiter::from_quota(lc_updates_by_range_quota)?;
 
         // check for peers to prune every 30 seconds, starting in 30 seconds
         let prune_every = tokio::time::Duration::from_secs(30);
@@ -218,40 +248,38 @@ impl RPCRateLimiterBuilder {
             bbrange_rl,
             blbrange_rl,
             blbroot_rl,
+            dcbroot_rl,
+            dcbrange_rl,
             lc_bootstrap_rl,
             lc_optimistic_update_rl,
             lc_finality_update_rl,
+            lc_updates_by_range_rl,
             init_time: Instant::now(),
+            fork_context,
         })
     }
 }
 
 pub trait RateLimiterItem {
     fn protocol(&self) -> Protocol;
-    fn max_responses(&self) -> u64;
+    fn max_responses(&self, current_fork: ForkName, spec: &ChainSpec) -> u64;
 }
 
-impl<E: EthSpec> RateLimiterItem for super::InboundRequest<E> {
+impl<E: EthSpec> RateLimiterItem for super::RequestType<E> {
     fn protocol(&self) -> Protocol {
         self.versioned_protocol().protocol()
     }
 
-    fn max_responses(&self) -> u64 {
-        self.max_responses()
+    fn max_responses(&self, current_fork: ForkName, spec: &ChainSpec) -> u64 {
+        self.max_responses(current_fork, spec)
     }
 }
 
-impl<E: EthSpec> RateLimiterItem for super::OutboundRequest<E> {
-    fn protocol(&self) -> Protocol {
-        self.versioned_protocol().protocol()
-    }
-
-    fn max_responses(&self) -> u64 {
-        self.max_responses()
-    }
-}
 impl RPCRateLimiter {
-    pub fn new_with_config(config: RateLimiterConfig) -> Result<Self, &'static str> {
+    pub fn new_with_config(
+        config: RateLimiterConfig,
+        fork_context: Arc<ForkContext>,
+    ) -> Result<Self, &'static str> {
         // Destructure to make sure every configuration value is used.
         let RateLimiterConfig {
             ping_quota,
@@ -262,9 +290,12 @@ impl RPCRateLimiter {
             blocks_by_root_quota,
             blobs_by_range_quota,
             blobs_by_root_quota,
+            data_columns_by_root_quota,
+            data_columns_by_range_quota,
             light_client_bootstrap_quota,
             light_client_optimistic_update_quota,
             light_client_finality_update_quota,
+            light_client_updates_by_range_quota,
         } = config;
 
         Self::builder()
@@ -276,6 +307,8 @@ impl RPCRateLimiter {
             .set_quota(Protocol::BlocksByRoot, blocks_by_root_quota)
             .set_quota(Protocol::BlobsByRange, blobs_by_range_quota)
             .set_quota(Protocol::BlobsByRoot, blobs_by_root_quota)
+            .set_quota(Protocol::DataColumnsByRoot, data_columns_by_root_quota)
+            .set_quota(Protocol::DataColumnsByRange, data_columns_by_range_quota)
             .set_quota(Protocol::LightClientBootstrap, light_client_bootstrap_quota)
             .set_quota(
                 Protocol::LightClientOptimisticUpdate,
@@ -285,7 +318,11 @@ impl RPCRateLimiter {
                 Protocol::LightClientFinalityUpdate,
                 light_client_finality_update_quota,
             )
-            .build()
+            .set_quota(
+                Protocol::LightClientUpdatesByRange,
+                light_client_updates_by_range_quota,
+            )
+            .build(fork_context)
     }
 
     /// Get a builder instance.
@@ -299,7 +336,9 @@ impl RPCRateLimiter {
         request: &Item,
     ) -> Result<(), RateLimitedErr> {
         let time_since_start = self.init_time.elapsed();
-        let tokens = request.max_responses().max(1);
+        let tokens = request
+            .max_responses(self.fork_context.current_fork(), &self.fork_context.spec)
+            .max(1);
 
         let check =
             |limiter: &mut Limiter<PeerId>| limiter.allows(time_since_start, peer_id, tokens);
@@ -312,9 +351,12 @@ impl RPCRateLimiter {
             Protocol::BlocksByRoot => &mut self.bbroots_rl,
             Protocol::BlobsByRange => &mut self.blbrange_rl,
             Protocol::BlobsByRoot => &mut self.blbroot_rl,
+            Protocol::DataColumnsByRoot => &mut self.dcbroot_rl,
+            Protocol::DataColumnsByRange => &mut self.dcbrange_rl,
             Protocol::LightClientBootstrap => &mut self.lc_bootstrap_rl,
             Protocol::LightClientOptimisticUpdate => &mut self.lc_optimistic_update_rl,
             Protocol::LightClientFinalityUpdate => &mut self.lc_finality_update_rl,
+            Protocol::LightClientUpdatesByRange => &mut self.lc_updates_by_range_rl,
         };
         check(limiter)
     }
@@ -329,6 +371,8 @@ impl RPCRateLimiter {
         self.bbroots_rl.prune(time_since_start);
         self.blbrange_rl.prune(time_since_start);
         self.blbroot_rl.prune(time_since_start);
+        self.dcbrange_rl.prune(time_since_start);
+        self.dcbroot_rl.prune(time_since_start);
     }
 }
 

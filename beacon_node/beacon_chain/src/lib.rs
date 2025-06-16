@@ -28,8 +28,10 @@ pub mod eth1_chain;
 mod eth1_finalization_cache;
 pub mod events;
 pub mod execution_payload;
+pub mod fetch_blobs;
 pub mod fork_choice_signal;
 pub mod fork_revert;
+pub mod fulu_readiness;
 pub mod graffiti_calculator;
 mod head_tracker;
 pub mod historical_blocks;
@@ -42,17 +44,17 @@ pub mod migrate;
 mod naive_aggregation_pool;
 pub mod observed_aggregates;
 mod observed_attesters;
-mod observed_blob_sidecars;
 pub mod observed_block_producers;
+pub mod observed_data_sidecars;
 pub mod observed_operations;
 mod observed_slashable;
-pub mod otb_verification_service;
 mod persisted_beacon_chain;
 mod persisted_fork_choice;
 mod pre_finalization_cache;
 pub mod proposer_prep_service;
 pub mod schema_change;
 pub mod shuffling_cache;
+pub mod single_attestation;
 pub mod state_advance_timer;
 pub mod sync_committee_rewards;
 pub mod sync_committee_verification;
@@ -75,9 +77,9 @@ pub use self::historical_blocks::HistoricalBlockError;
 pub use attestation_verification::Error as AttestationError;
 pub use beacon_fork_choice_store::{BeaconForkChoiceStore, Error as ForkChoiceStoreError};
 pub use block_verification::{
-    get_block_root, BlockError, ExecutionPayloadError, ExecutionPendingBlock, GossipVerifiedBlock,
-    IntoExecutionPendingBlock, IntoGossipVerifiedBlockContents, PayloadVerificationOutcome,
-    PayloadVerificationStatus,
+    build_blob_data_column_sidecars, get_block_root, BlockError, ExecutionPayloadError,
+    ExecutionPendingBlock, GossipVerifiedBlock, IntoExecutionPendingBlock, IntoGossipVerifiedBlock,
+    InvalidSignature, PayloadVerificationOutcome, PayloadVerificationStatus,
 };
 pub use block_verification_types::AvailabilityPendingExecutedBlock;
 pub use block_verification_types::ExecutedBlock;

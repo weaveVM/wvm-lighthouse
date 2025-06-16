@@ -15,8 +15,8 @@ use std::{
     fmt,
 };
 use types::{
-    AttestationShufflingId, ChainSpec, Checkpoint, Epoch, EthSpec, ExecutionBlockHash, Hash256,
-    Slot,
+    AttestationShufflingId, ChainSpec, Checkpoint, Epoch, EthSpec, ExecutionBlockHash,
+    FixedBytesExtended, Hash256, Slot,
 };
 
 pub const DEFAULT_PRUNE_THRESHOLD: usize = 256;
@@ -856,8 +856,16 @@ impl ProtoArrayForkChoice {
     }
 
     /// See `ProtoArray::iter_nodes`
-    pub fn iter_nodes<'a>(&'a self, block_root: &Hash256) -> Iter<'a> {
+    pub fn iter_nodes(&self, block_root: &Hash256) -> Iter {
         self.proto_array.iter_nodes(block_root)
+    }
+
+    /// See `ProtoArray::iter_block_roots`
+    pub fn iter_block_roots(
+        &self,
+        block_root: &Hash256,
+    ) -> impl Iterator<Item = (Hash256, Slot)> + use<'_> {
+        self.proto_array.iter_block_roots(block_root)
     }
 
     pub fn as_bytes(&self) -> Vec<u8> {
@@ -993,7 +1001,7 @@ fn compute_deltas(
 #[cfg(test)]
 mod test_compute_deltas {
     use super::*;
-    use types::MainnetEthSpec;
+    use types::{FixedBytesExtended, MainnetEthSpec};
 
     /// Gives a hash that is not the zero hash (unless i is `usize::MAX)`.
     fn hash_from_index(i: usize) -> Hash256 {
@@ -1121,7 +1129,7 @@ mod test_compute_deltas {
     ///
     /// - `A` (slot 31) is the common descendant.
     /// - `B` (slot 33) descends from `A`, but there is a single skip slot
-    ///     between it and `A`.
+    ///   between it and `A`.
     /// - `C` (slot 32) descends from `A` and conflicts with `B`.
     ///
     /// Imagine that the `B` chain is finalized at epoch 1. This means that the

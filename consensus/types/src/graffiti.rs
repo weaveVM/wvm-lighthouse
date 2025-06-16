@@ -57,7 +57,7 @@ impl FromStr for GraffitiString {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.as_bytes().len() > GRAFFITI_BYTES_LEN {
+        if s.len() > GRAFFITI_BYTES_LEN {
             return Err(format!(
                 "Graffiti exceeds max length {}",
                 GRAFFITI_BYTES_LEN
@@ -90,7 +90,11 @@ impl From<GraffitiString> for Graffiti {
         graffiti
             .get_mut(..graffiti_len)
             .expect("graffiti_len <= GRAFFITI_BYTES_LEN")
-            .copy_from_slice(graffiti_bytes);
+            .copy_from_slice(
+                graffiti_bytes
+                    .get(..graffiti_len)
+                    .expect("graffiti_len <= GRAFFITI_BYTES_LEN"),
+            );
         graffiti.into()
     }
 }
@@ -180,6 +184,6 @@ impl TreeHash for Graffiti {
 
 impl TestRandom for Graffiti {
     fn random_for_test(rng: &mut impl RngCore) -> Self {
-        Self::from(Hash256::random_for_test(rng).to_fixed_bytes())
+        Self::from(Hash256::random_for_test(rng).0)
     }
 }

@@ -46,15 +46,6 @@ pub fn cli_app() -> Command {
                 deposits in the same format as the \"ethereum/staking-deposit-cli\" tool.",
         )
         .arg(
-            Arg::new("help")
-                .long("help")
-                .short('h')
-                .help("Prints help information")
-                .action(ArgAction::HelpLong)
-                .display_order(0)
-                .help_heading(FLAG_HEADER),
-        )
-        .arg(
             Arg::new(OUTPUT_PATH_FLAG)
                 .long(OUTPUT_PATH_FLAG)
                 .value_name("DIRECTORY")
@@ -106,22 +97,15 @@ pub fn cli_app() -> Command {
                 .display_order(0),
         )
         .arg(
-            Arg::new(STDIN_INPUTS_FLAG)
-                .action(ArgAction::SetTrue)
-                .hide(cfg!(windows))
-                .long(STDIN_INPUTS_FLAG)
-                .help("If present, read all user inputs from stdin instead of tty.")
-                .display_order(0)
-                .help_heading(FLAG_HEADER),
-        )
-        .arg(
             Arg::new(DISABLE_DEPOSITS_FLAG)
                 .long(DISABLE_DEPOSITS_FLAG)
                 .help(
                     "When provided don't generate the deposits JSON file that is \
                     commonly used for submitting validator deposits via a web UI. \
                     Using this flag will save several seconds per validator if the \
-                    user has an alternate strategy for submitting deposits.",
+                    user has an alternate strategy for submitting deposits. \
+                    If used, the --force-bls-withdrawal-credentials is also required \
+                    to ensure users are aware that an --eth1-withdrawal-address is not set.",
                 )
                 .action(ArgAction::SetTrue)
                 .help_heading(FLAG_HEADER)
@@ -302,7 +286,7 @@ struct ValidatorsAndDeposits {
 }
 
 impl ValidatorsAndDeposits {
-    async fn new<'a, E: EthSpec>(config: CreateConfig, spec: &ChainSpec) -> Result<Self, String> {
+    async fn new<E: EthSpec>(config: CreateConfig, spec: &ChainSpec) -> Result<Self, String> {
         let CreateConfig {
             // The output path is handled upstream.
             output_path: _,
@@ -561,7 +545,7 @@ pub async fn cli_run<E: EthSpec>(
     }
 }
 
-async fn run<'a, E: EthSpec>(config: CreateConfig, spec: &ChainSpec) -> Result<(), String> {
+async fn run<E: EthSpec>(config: CreateConfig, spec: &ChainSpec) -> Result<(), String> {
     let output_path = config.output_path.clone();
 
     if !output_path.exists() {
@@ -725,16 +709,16 @@ pub mod tests {
                         assert_eq!(deposit.pubkey, validator_pubkey.clone().into());
                         if let Some(address) = config.eth1_withdrawal_address {
                             assert_eq!(
-                                deposit.withdrawal_credentials.as_bytes()[0],
+                                deposit.withdrawal_credentials.as_slice()[0],
                                 spec.eth1_address_withdrawal_prefix_byte
                             );
                             assert_eq!(
-                                &deposit.withdrawal_credentials.as_bytes()[12..],
-                                address.as_bytes()
+                                &deposit.withdrawal_credentials.as_slice()[12..],
+                                address.as_slice()
                             );
                         } else {
                             assert_eq!(
-                                deposit.withdrawal_credentials.as_bytes()[0],
+                                deposit.withdrawal_credentials.as_slice()[0],
                                 spec.bls_withdrawal_prefix_byte
                             );
                         }

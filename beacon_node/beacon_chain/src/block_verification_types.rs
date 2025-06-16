@@ -1,18 +1,17 @@
-use crate::blob_verification::{GossipBlobError, GossipVerifiedBlobList};
-use crate::block_verification::BlockError;
 use crate::data_availability_checker::AvailabilityCheckError;
 pub use crate::data_availability_checker::{AvailableBlock, MaybeAvailableBlock};
+use crate::data_column_verification::{CustodyDataColumn, CustodyDataColumnList};
 use crate::eth1_finalization_cache::Eth1FinalizationData;
-use crate::{get_block_root, GossipVerifiedBlock, PayloadVerificationOutcome};
+use crate::{get_block_root, PayloadVerificationOutcome};
 use derivative::Derivative;
-use ssz_types::VariableList;
 use state_processing::ConsensusContext;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use types::blob_sidecar::{BlobIdentifier, BlobSidecarError, FixedBlobSidecarList};
+use tokio::sync::oneshot;
+use types::blob_sidecar::BlobIdentifier;
 use types::{
-    BeaconBlockRef, BeaconState, BlindedPayload, BlobSidecarList, Epoch, EthSpec, Hash256,
-    SignedBeaconBlock, SignedBeaconBlockHeader, Slot,
+    BeaconBlockRef, BeaconState, BlindedPayload, BlobSidecarList, ChainSpec, DataColumnSidecarList,
+    Epoch, EthSpec, Hash256, RuntimeVariableList, SignedBeaconBlock, SignedBeaconBlockHeader, Slot,
 };
 
 /// A block that has been received over RPC. It has 2 internal variants:
@@ -50,6 +49,7 @@ impl<E: EthSpec> RpcBlock<E> {
         match &self.block {
             RpcBlockInner::Block(block) => block,
             RpcBlockInner::BlockAndBlobs(block, _) => block,
+            RpcBlockInner::BlockAndCustodyColumns(block, _) => block,
         }
     }
 
@@ -57,6 +57,7 @@ impl<E: EthSpec> RpcBlock<E> {
         match &self.block {
             RpcBlockInner::Block(block) => block.clone(),
             RpcBlockInner::BlockAndBlobs(block, _) => block.clone(),
+            RpcBlockInner::BlockAndCustodyColumns(block, _) => block.clone(),
         }
     }
 
@@ -64,6 +65,15 @@ impl<E: EthSpec> RpcBlock<E> {
         match &self.block {
             RpcBlockInner::Block(_) => None,
             RpcBlockInner::BlockAndBlobs(_, blobs) => Some(blobs),
+            RpcBlockInner::BlockAndCustodyColumns(_, _) => None,
+        }
+    }
+
+    pub fn custody_columns(&self) -> Option<&CustodyDataColumnList<E>> {
+        match &self.block {
+            RpcBlockInner::Block(_) => None,
+            RpcBlockInner::BlockAndBlobs(_, _) => None,
+            RpcBlockInner::BlockAndCustodyColumns(_, data_columns) => Some(data_columns),
         }
     }
 }
@@ -79,6 +89,9 @@ enum RpcBlockInner<E: EthSpec> {
     /// This variant is used with parent lookups and by-range responses. It should have all blobs
     /// ordered, all block roots matching, and the correct number of blobs for this block.
     BlockAndBlobs(Arc<SignedBeaconBlock<E>>, BlobSidecarList<E>),
+    /// This variant is used with parent lookups and by-range responses. It should have all
+    /// requested data columns, all block roots matching for this block.
+    BlockAndCustodyColumns(Arc<SignedBeaconBlock<E>>, CustodyDataColumnList<E>),
 }
 
 impl<E: EthSpec> RpcBlock<E> {
@@ -136,40 +149,61 @@ impl<E: EthSpec> RpcBlock<E> {
         })
     }
 
-    pub fn new_from_fixed(
-        block_root: Hash256,
+    pub fn new_with_custody_columns(
+        block_root: Option<Hash256>,
         block: Arc<SignedBeaconBlock<E>>,
-        blobs: FixedBlobSidecarList<E>,
+        custody_columns: Vec<CustodyDataColumn<E>>,
+        spec: &ChainSpec,
     ) -> Result<Self, AvailabilityCheckError> {
-        let filtered = blobs
-            .into_iter()
-            .filter_map(|b| b.clone())
-            .collect::<Vec<_>>();
-        let blobs = if filtered.is_empty() {
-            None
+        let block_root = block_root.unwrap_or_else(|| get_block_root(&block));
+
+        if block.num_expected_blobs() > 0 && custody_columns.is_empty() {
+            // The number of required custody columns is out of scope here.
+            return Err(AvailabilityCheckError::MissingCustodyColumns);
+        }
+        // Treat empty data column lists as if they are missing.
+        let inner = if !custody_columns.is_empty() {
+            RpcBlockInner::BlockAndCustodyColumns(
+                block,
+                RuntimeVariableList::new(custody_columns, spec.number_of_columns as usize)?,
+            )
         } else {
-            Some(VariableList::from(filtered))
+            RpcBlockInner::Block(block)
         };
-        Self::new(Some(block_root), block, blobs)
+        Ok(Self {
+            block_root,
+            block: inner,
+        })
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn deconstruct(
         self,
     ) -> (
         Hash256,
         Arc<SignedBeaconBlock<E>>,
         Option<BlobSidecarList<E>>,
+        Option<CustodyDataColumnList<E>>,
     ) {
         let block_root = self.block_root();
         match self.block {
-            RpcBlockInner::Block(block) => (block_root, block, None),
-            RpcBlockInner::BlockAndBlobs(block, blobs) => (block_root, block, Some(blobs)),
+            RpcBlockInner::Block(block) => (block_root, block, None, None),
+            RpcBlockInner::BlockAndBlobs(block, blobs) => (block_root, block, Some(blobs), None),
+            RpcBlockInner::BlockAndCustodyColumns(block, data_columns) => {
+                (block_root, block, None, Some(data_columns))
+            }
         }
     }
     pub fn n_blobs(&self) -> usize {
         match &self.block {
-            RpcBlockInner::Block(_) => 0,
+            RpcBlockInner::Block(_) | RpcBlockInner::BlockAndCustodyColumns(_, _) => 0,
             RpcBlockInner::BlockAndBlobs(_, blobs) => blobs.len(),
+        }
+    }
+    pub fn n_data_columns(&self) -> usize {
+        match &self.block {
+            RpcBlockInner::Block(_) | RpcBlockInner::BlockAndBlobs(_, _) => 0,
+            RpcBlockInner::BlockAndCustodyColumns(_, data_columns) => data_columns.len(),
         }
     }
 }
@@ -304,7 +338,8 @@ impl<E: EthSpec> AvailabilityPendingExecutedBlock<E> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Derivative)]
+#[derivative(PartialEq)]
 pub struct BlockImportData<E: EthSpec> {
     pub block_root: Hash256,
     pub state: BeaconState<E>,
@@ -312,6 +347,12 @@ pub struct BlockImportData<E: EthSpec> {
     pub parent_eth1_finalization_data: Eth1FinalizationData,
     pub confirmed_state_roots: Vec<Hash256>,
     pub consensus_context: ConsensusContext<E>,
+    #[derivative(PartialEq = "ignore")]
+    /// An optional receiver for `DataColumnSidecarList`.
+    ///
+    /// This field is `Some` when data columns are being computed asynchronously.
+    /// The resulting `DataColumnSidecarList` will be sent through this receiver.
+    pub data_column_recv: Option<oneshot::Receiver<DataColumnSidecarList<E>>>,
 }
 
 impl<E: EthSpec> BlockImportData<E> {
@@ -330,44 +371,7 @@ impl<E: EthSpec> BlockImportData<E> {
             },
             confirmed_state_roots: vec![],
             consensus_context: ConsensusContext::new(Slot::new(0)),
-        }
-    }
-}
-
-pub type GossipVerifiedBlockContents<E> =
-    (GossipVerifiedBlock<E>, Option<GossipVerifiedBlobList<E>>);
-
-#[derive(Debug)]
-pub enum BlockContentsError<E: EthSpec> {
-    BlockError(BlockError<E>),
-    BlobError(GossipBlobError<E>),
-    SidecarError(BlobSidecarError),
-}
-
-impl<E: EthSpec> From<BlockError<E>> for BlockContentsError<E> {
-    fn from(value: BlockError<E>) -> Self {
-        Self::BlockError(value)
-    }
-}
-
-impl<E: EthSpec> From<GossipBlobError<E>> for BlockContentsError<E> {
-    fn from(value: GossipBlobError<E>) -> Self {
-        Self::BlobError(value)
-    }
-}
-
-impl<E: EthSpec> std::fmt::Display for BlockContentsError<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BlockContentsError::BlockError(err) => {
-                write!(f, "BlockError({})", err)
-            }
-            BlockContentsError::BlobError(err) => {
-                write!(f, "BlobError({})", err)
-            }
-            BlockContentsError::SidecarError(err) => {
-                write!(f, "SidecarError({:?})", err)
-            }
+            data_column_recv: None,
         }
     }
 }
@@ -383,7 +387,6 @@ pub trait AsBlock<E: EthSpec> {
     fn as_block(&self) -> &SignedBeaconBlock<E>;
     fn block_cloned(&self) -> Arc<SignedBeaconBlock<E>>;
     fn canonical_root(&self) -> Hash256;
-    fn into_rpc_block(self) -> RpcBlock<E>;
 }
 
 impl<E: EthSpec> AsBlock<E> for Arc<SignedBeaconBlock<E>> {
@@ -421,10 +424,6 @@ impl<E: EthSpec> AsBlock<E> for Arc<SignedBeaconBlock<E>> {
 
     fn canonical_root(&self) -> Hash256 {
         SignedBeaconBlock::canonical_root(self)
-    }
-
-    fn into_rpc_block(self) -> RpcBlock<E> {
-        RpcBlock::new_without_blobs(None, self)
     }
 }
 
@@ -468,15 +467,6 @@ impl<E: EthSpec> AsBlock<E> for MaybeAvailableBlock<E> {
     fn canonical_root(&self) -> Hash256 {
         self.as_block().canonical_root()
     }
-
-    fn into_rpc_block(self) -> RpcBlock<E> {
-        match self {
-            MaybeAvailableBlock::Available(available_block) => available_block.into_rpc_block(),
-            MaybeAvailableBlock::AvailabilityPending { block_root, block } => {
-                RpcBlock::new_without_blobs(Some(block_root), block)
-            }
-        }
-    }
 }
 
 impl<E: EthSpec> AsBlock<E> for AvailableBlock<E> {
@@ -515,20 +505,6 @@ impl<E: EthSpec> AsBlock<E> for AvailableBlock<E> {
     fn canonical_root(&self) -> Hash256 {
         self.block().canonical_root()
     }
-
-    fn into_rpc_block(self) -> RpcBlock<E> {
-        let (block_root, block, blobs_opt) = self.deconstruct();
-        // Circumvent the constructor here, because an Available block will have already had
-        // consistency checks performed.
-        let inner = match blobs_opt {
-            None => RpcBlockInner::Block(block),
-            Some(blobs) => RpcBlockInner::BlockAndBlobs(block, blobs),
-        };
-        RpcBlock {
-            block_root,
-            block: inner,
-        }
-    }
 }
 
 impl<E: EthSpec> AsBlock<E> for RpcBlock<E> {
@@ -554,19 +530,17 @@ impl<E: EthSpec> AsBlock<E> for RpcBlock<E> {
         match &self.block {
             RpcBlockInner::Block(block) => block,
             RpcBlockInner::BlockAndBlobs(block, _) => block,
+            RpcBlockInner::BlockAndCustodyColumns(block, _) => block,
         }
     }
     fn block_cloned(&self) -> Arc<SignedBeaconBlock<E>> {
         match &self.block {
             RpcBlockInner::Block(block) => block.clone(),
             RpcBlockInner::BlockAndBlobs(block, _) => block.clone(),
+            RpcBlockInner::BlockAndCustodyColumns(block, _) => block.clone(),
         }
     }
     fn canonical_root(&self) -> Hash256 {
         self.as_block().canonical_root()
-    }
-
-    fn into_rpc_block(self) -> RpcBlock<E> {
-        self
     }
 }

@@ -6,11 +6,10 @@ use crate::engine_api::{
 };
 use crate::json_structures::JsonClientVersionV1;
 use bytes::Bytes;
-use environment::null_logger;
 use execution_block_generator::PoWBlock;
 use handle_rpc::handle_rpc;
 use kzg::Kzg;
-use lazy_static::lazy_static;
+use logging::test_logger;
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -20,18 +19,19 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::{runtime, sync::oneshot};
-use types::{EthSpec, ExecutionBlockHash, Uint256};
+use types::{ChainSpec, EthSpec, ExecutionBlockHash, Uint256};
 use warp::{http::StatusCode, Filter, Rejection};
 
 use crate::EngineCapabilities;
+pub use execution_block_generator::DEFAULT_GAS_LIMIT;
 pub use execution_block_generator::{
     generate_blobs, generate_genesis_block, generate_genesis_header, generate_pow_block,
-    static_valid_tx, Block, ExecutionBlockGenerator,
+    mock_el_extra_data, static_valid_tx, Block, ExecutionBlockGenerator,
 };
 pub use hook::Hook;
-pub use mock_builder::{MockBuilder, Operation};
+pub use mock_builder::{mock_builder_extra_data, MockBuilder, Operation};
 pub use mock_execution_layer::MockExecutionLayer;
 
 pub const DEFAULT_TERMINAL_DIFFICULTY: u64 = 6400;
@@ -44,6 +44,7 @@ pub const DEFAULT_ENGINE_CAPABILITIES: EngineCapabilities = EngineCapabilities {
     new_payload_v2: true,
     new_payload_v3: true,
     new_payload_v4: true,
+    new_payload_v5: true,
     forkchoice_updated_v1: true,
     forkchoice_updated_v2: true,
     forkchoice_updated_v3: true,
@@ -53,17 +54,18 @@ pub const DEFAULT_ENGINE_CAPABILITIES: EngineCapabilities = EngineCapabilities {
     get_payload_v2: true,
     get_payload_v3: true,
     get_payload_v4: true,
+    get_payload_v5: true,
     get_client_version_v1: true,
+    get_blobs_v1: true,
 };
 
-lazy_static! {
-    pub static ref DEFAULT_CLIENT_VERSION: JsonClientVersionV1 = JsonClientVersionV1 {
+pub static DEFAULT_CLIENT_VERSION: LazyLock<JsonClientVersionV1> =
+    LazyLock::new(|| JsonClientVersionV1 {
         code: "MC".to_string(), // "mock client"
         name: "Mock Execution Client".to_string(),
         version: "0.1.0".to_string(),
         commit: "0xabcdef01".to_string(),
-    };
-}
+    });
 
 mod execution_block_generator;
 mod handle_rpc;
@@ -82,19 +84,21 @@ pub struct MockExecutionConfig {
     pub shanghai_time: Option<u64>,
     pub cancun_time: Option<u64>,
     pub prague_time: Option<u64>,
+    pub osaka_time: Option<u64>,
 }
 
 impl Default for MockExecutionConfig {
     fn default() -> Self {
         Self {
             jwt_key: JwtKey::random(),
-            terminal_difficulty: DEFAULT_TERMINAL_DIFFICULTY.into(),
+            terminal_difficulty: Uint256::from(DEFAULT_TERMINAL_DIFFICULTY),
             terminal_block: DEFAULT_TERMINAL_BLOCK,
             terminal_block_hash: ExecutionBlockHash::zero(),
             server_config: Config::default(),
             shanghai_time: None,
             cancun_time: None,
             prague_time: None,
+            osaka_time: None,
         }
     }
 }
@@ -107,16 +111,18 @@ pub struct MockServer<E: EthSpec> {
 }
 
 impl<E: EthSpec> MockServer<E> {
-    pub fn unit_testing() -> Self {
+    pub fn unit_testing(chain_spec: Arc<ChainSpec>) -> Self {
         Self::new(
             &runtime::Handle::current(),
             JwtKey::from_slice(&DEFAULT_JWT_SECRET).unwrap(),
-            DEFAULT_TERMINAL_DIFFICULTY.into(),
+            Uint256::from(DEFAULT_TERMINAL_DIFFICULTY),
             DEFAULT_TERMINAL_BLOCK,
             ExecutionBlockHash::zero(),
             None, // FIXME(capella): should this be the default?
             None, // FIXME(deneb): should this be the default?
             None, // FIXME(electra): should this be the default?
+            None, // FIXME(fulu): should this be the default?
+            chain_spec,
             None,
         )
     }
@@ -124,6 +130,7 @@ impl<E: EthSpec> MockServer<E> {
     pub fn new_with_config(
         handle: &runtime::Handle,
         config: MockExecutionConfig,
+        spec: Arc<ChainSpec>,
         kzg: Option<Arc<Kzg>>,
     ) -> Self {
         let MockExecutionConfig {
@@ -135,6 +142,7 @@ impl<E: EthSpec> MockServer<E> {
             shanghai_time,
             cancun_time,
             prague_time,
+            osaka_time,
         } = config;
         let last_echo_request = Arc::new(RwLock::new(None));
         let preloaded_responses = Arc::new(Mutex::new(vec![]));
@@ -145,13 +153,15 @@ impl<E: EthSpec> MockServer<E> {
             shanghai_time,
             cancun_time,
             prague_time,
+            osaka_time,
+            spec,
             kzg,
         );
 
         let ctx: Arc<Context<E>> = Arc::new(Context {
             config: server_config,
             jwt_key,
-            log: null_logger().unwrap(),
+            log: test_logger(),
             last_echo_request: last_echo_request.clone(),
             execution_block_generator: RwLock::new(execution_block_generator),
             previous_request: <_>::default(),
@@ -208,6 +218,8 @@ impl<E: EthSpec> MockServer<E> {
         shanghai_time: Option<u64>,
         cancun_time: Option<u64>,
         prague_time: Option<u64>,
+        osaka_time: Option<u64>,
+        spec: Arc<ChainSpec>,
         kzg: Option<Arc<Kzg>>,
     ) -> Self {
         Self::new_with_config(
@@ -221,7 +233,9 @@ impl<E: EthSpec> MockServer<E> {
                 shanghai_time,
                 cancun_time,
                 prague_time,
+                osaka_time,
             },
+            spec,
             kzg,
         )
     }
